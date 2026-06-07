@@ -1,0 +1,21 @@
+{
+  "framework": "nextjs",
+  "buildCommand": "npm run build",
+  "devCommand": "npm run dev",
+  "installCommand": "npm install",
+  "regions": ["sin1"],
+  "functions": {
+    "app/api/sync/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/emails/route.ts": {
+      "maxDuration": 10
+    },
+    "app/api/auth/route.ts": {
+      "maxDuration": 10
+    },
+    "app/api/auth/callback/route.ts": {
+      "maxDuration": 10
+    }
+  }
+}
