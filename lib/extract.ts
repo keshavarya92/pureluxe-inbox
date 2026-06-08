@@ -97,12 +97,30 @@ export function parseCancellationDeadline(value: string | null, checkIn: string 
 // Map Haiku's booking JSONB to bookings table columns
 // ----------------------------------------------------------------
 
+// Normalises dates to YYYY-MM-DD. Handles ISO dates and Amadeus
+// format (DDMMMYYYY, e.g. 04JUL2026) so Postgres date columns accept them.
+function toISODate(v: string | null | undefined): string | null {
+  if (!v) return null
+  const s = String(v).trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+  const amadeusMatch = s.match(/^(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d{4})$/i)
+  if (amadeusMatch) {
+    const m: Record<string, string> = {
+      JAN:'01',FEB:'02',MAR:'03',APR:'04',MAY:'05',JUN:'06',
+      JUL:'07',AUG:'08',SEP:'09',OCT:'10',NOV:'11',DEC:'12',
+    }
+    return `${amadeusMatch[3]}-${m[amadeusMatch[2].toUpperCase()]}-${amadeusMatch[1]}`
+  }
+  const d = new Date(s)
+  return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10)
+}
+
 function mapBookingJson(b: Record<string, any>): Record<string, unknown> {
   return {
     client_name:         b.clientName         ?? null,
     hotel_name:          b.property           ?? null,
-    check_in:            b.checkIn            ?? null,
-    check_out:           b.checkOut           ?? null,
+    check_in:            toISODate(b.checkIn),
+    check_out:           toISODate(b.checkOut),
     num_rooms:           b.rooms              ?? null,
     num_adults:          b.guests             ?? null,
     total_cost:          b.totalAmount        ?? null,
@@ -194,6 +212,8 @@ async function insertCommission(bookingId: string, extracted: Record<string, unk
 
 const ATTACHMENT_PHRASES = /please find attached|confirmation letter attached|please see attached|kindly find attached|booking confirmation attached|voucher attached/i
 
+const NON_HOTEL_SUBJECTS = /boarding pass|flight check-in|bags? are checked|trip reminder/i
+
 function hasConfirmationAttachment(snippet: string | null, body: string | null): boolean {
   return ATTACHMENT_PHRASES.test(snippet ?? '') || ATTACHMENT_PHRASES.test(body ?? '')
 }
@@ -247,6 +267,13 @@ export async function runExtraction(): Promise<ExtractionResult> {
 
   for (const email of emails ?? []) {
     try {
+      // Skip non-hotel transactional emails that Haiku may mis-classify
+      if (NON_HOTEL_SUBJECTS.test(email.subject)) {
+        await markExtracted(email.id)
+        results.push('skipped')
+        continue
+      }
+
       if (hasConfirmationAttachment(email.snippet, email.body)) {
         // Flag for attachment pass; leave booking_extracted = false
         await markAttachmentPending(email.id)
@@ -256,11 +283,27 @@ export async function runExtraction(): Promise<ExtractionResult> {
 
       const extracted = mapBookingJson(email.booking as Record<string, any>)
 
-      if (!extracted.hotel_name && !extracted.client_name) {
+      // Skip only if we have neither a client nor a property — a partial record is fine
+      if (!extracted.client_name && !extracted.hotel_name) {
         await markExtracted(email.id)
         results.push('skipped')
         continue
       }
+
+      // Fall back to 'Unknown' so the record can be inserted and enriched later
+      if (!extracted.hotel_name) extracted.hotel_name = 'Unknown'
+
+      console.log('Upserting booking:', {
+        emailId:     email.id,
+        subject:     email.subject,
+        client_name: extracted.client_name,
+        hotel_name:  extracted.hotel_name,
+        check_in:    extracted.check_in,
+        check_out:   extracted.check_out,
+        status:      extracted.status,
+        amadeus_ref: extracted.amadeus_ref,
+        hotel_ref:   extracted.hotel_ref,
+      })
 
       const [clientId, propertyId, bookedBy] = await Promise.all([
         extracted.client_name
