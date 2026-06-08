@@ -129,7 +129,7 @@ export const store = {
 
     const all = data ?? []
     const byCategory: Record<string, number> = {
-      booking: 0, client: 0, supplier: 0, finance: 0,
+      booking: 0, enquiry: 0, client: 0, supplier: 0, finance: 0,
       ops: 0, pre_stay: 0, dispute: 0, noise: 0,
     }
     for (const r of all) {

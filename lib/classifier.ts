@@ -18,14 +18,15 @@ Your job is to classify and extract structured data from emails.
 KFT email addresses: keshav@kft.travel, sanjay@kft.travel, tours@kft.travel, holidays@kft.travel, info@kft.travel
 
 CATEGORIES:
-- booking: Hotel confirmations, options, rate quotes, flight tickets, transfer bookings, wellness programme confirmations, restaurant reservations
+- booking: CONFIRMED hotel/resort/villa reservations that (a) contain an explicit confirmation number, booking reference, or reservation number issued by the property, consortium, or GDS, AND (b) have status confirmed or reconfirmed, AND (c) are sent FROM a hotel, resort, consortium (LHW, Serandipians, TravellerMade, THRS, Heavens Portfolio), or GDS system — NEVER from a @kft.travel address. Do NOT use this for options, rate quotes, availability responses, or any email lacking a confirmation number.
+- enquiry: Pre-booking and pre-confirmation emails — rate quotes, availability check responses, option letters (hold/option on rooms), villa enquiry threads. Use this whenever booking status is enquiry, quote, or option, or when there is no confirmation number from the property.
 - client: Emails from or about clients, client requests, client updates
 - supplier: Emails from hotels, airlines, DMCs, wellness resorts, ground handlers, consortiums (LHW, Serandipians, TravellerMade, THRS, Heavens Portfolio)
 - finance: Invoices, payment confirmations, payment links, credit card alerts, commission statements, cancellation invoices
 - pre_stay: Arrival time requests, wellness questionnaires, room preference requests, transfer details, pre-stay coordination
-- ops: Internal team emails, admin, industry events, ILTM, webinars, trade shows
+- ops: Internal team emails, admin, industry events, ILTM, webinars, trade shows. Also use ops for any email sent FROM a @kft.travel address regarding an existing booking (room configuration requests, rooming list updates, special request follow-ups, internal coordination about a trip).
 - dispute: Cancellation disputes, overbooking issues, complaint threads, refund requests
-- noise: Newsletters, marketing, promotions, social media, personal finance alerts (SIP, IPO, mutual funds), irrelevant spam, airline baggage notifications (baggage tracker, checked-in baggage, baggage allowance alerts from Air India or any airline)
+- noise: Newsletters, marketing, promotions, social media, personal finance alerts (SIP, IPO, mutual funds), irrelevant spam, airline baggage notifications (baggage tracker, checked-in baggage, baggage allowance alerts from any airline), boarding passes, flight check-in confirmations, flight trip reminders
 
 ACTION PRIORITY:
 - urgent: Needs response within 4 hours (option expiring, client complaint, live trip issue)
@@ -48,7 +49,7 @@ ${email.body || email.snippet}
 
 Return this exact JSON structure (include all fields, use null for unknown):
 {
-  "category": "booking|client|supplier|finance|pre_stay|ops|dispute|noise",
+  "category": "booking|enquiry|client|supplier|finance|pre_stay|ops|dispute|noise",
   "tags": ["array", "of", "relevant", "categories"],
   "summary": "One sentence max 15 words describing what this email needs or is about",
   "actionRequired": true|false,
@@ -93,9 +94,9 @@ Return this exact JSON structure (include all fields, use null for unknown):
   }
 }
 
-If category is not "booking", set booking fields to null.
+If category is not "booking" or "enquiry", set booking fields to null.
 If category is not "finance", set finance fields to null.
-If not a supplier email, set supplierContact fields to null.`
+If not a supplier, booking, enquiry, or pre_stay email, set supplierContact fields to null.`
 
 export async function classifyEmail(email: RawEmail): Promise<ClassifiedEmail> {
   try {
@@ -136,9 +137,9 @@ export async function classifyEmail(email: RawEmail): Promise<ClassifiedEmail> {
       unread: email.unread,
       ...parsed,
       // Clean up null booking/finance if not relevant
-      booking: parsed.category === 'booking' ? parsed.booking : undefined,
+      booking: ['booking', 'enquiry'].includes(parsed.category) ? parsed.booking : undefined,
       finance: parsed.category === 'finance' ? parsed.finance : undefined,
-      supplierContact: ['supplier', 'booking', 'pre_stay'].includes(parsed.category)
+      supplierContact: ['supplier', 'booking', 'enquiry', 'pre_stay'].includes(parsed.category)
         ? parsed.supplierContact
         : undefined,
     }

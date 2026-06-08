@@ -1,5 +1,6 @@
 export type EmailCategory =
   | 'booking'
+  | 'enquiry'
   | 'client'
   | 'supplier'
   | 'finance'
