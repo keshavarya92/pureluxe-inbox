@@ -6,16 +6,16 @@
   "regions": ["sin1"],
   "functions": {
     "app/api/sync/route.ts": {
-      "maxDuration": 60
+      "maxDuration": 300
     },
     "app/api/emails/route.ts": {
-      "maxDuration": 10
+      "maxDuration": 30
     },
     "app/api/auth/route.ts": {
-      "maxDuration": 10
+      "maxDuration": 30
     },
     "app/api/auth/callback/route.ts": {
-      "maxDuration": 10
+      "maxDuration": 30
     }
   }
 }

@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json().catch(() => ({}))
-    const maxResults = body.maxResults || 50
+    const maxResults = body.maxResults || 20
 
     store.setSyncInProgress(true)
 
