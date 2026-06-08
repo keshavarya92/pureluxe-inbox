@@ -148,10 +148,7 @@ export default function InboxPage() {
     setExtracting(true)
     setExtractStatus(null)
     try {
-      const res = await fetch('/api/cron/extract', {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${process.env.NEXT_PUBLIC_CRON_SECRET}` },
-      })
+      const res = await fetch('/api/admin/extract', { method: 'POST' })
       const result = await res.json()
       if (!res.ok) throw new Error(result.error)
       if (result.processed === 0) {

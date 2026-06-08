@@ -1,9 +1,11 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { NextResponse } from 'next/server'
+import { requireAuth } from '@/lib/session'
 import { runExtraction } from '@/lib/extract'
 
-async function handler(req: NextRequest) {
-  const auth = req.headers.get('authorization')
-  if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
+export async function POST() {
+  try {
+    await requireAuth()
+  } catch {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
@@ -14,6 +16,3 @@ async function handler(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 })
   }
 }
-
-export const GET = handler
-export const POST = handler
