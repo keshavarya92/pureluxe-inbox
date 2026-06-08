@@ -222,6 +222,20 @@ async function upsertBooking(
   }
 }
 
+const ATTACHMENT_PHRASES = /please find attached|confirmation letter attached|please see attached|kindly find attached|booking confirmation attached|voucher attached/i
+
+function hasConfirmationAttachment(snippet: string | null, body: string | null): boolean {
+  return ATTACHMENT_PHRASES.test(snippet ?? '') || ATTACHMENT_PHRASES.test(body ?? '')
+}
+
+async function markAttachmentPending(emailId: string): Promise<void> {
+  const { error } = await supabase
+    .from('inbox_emails')
+    .update({ has_confirmation_attachment: true, booking_extracted: true })
+    .eq('id', emailId)
+  if (error) throw new Error(error.message)
+}
+
 async function markExtracted(emailId: string): Promise<void> {
   const { error } = await supabase
     .from('inbox_emails')
@@ -261,6 +275,12 @@ export async function runExtraction(): Promise<ExtractionResult> {
 
   for (const email of emails) {
     try {
+      if (hasConfirmationAttachment(email.snippet, email.body)) {
+        await markAttachmentPending(email.id)
+        results.push('skipped')
+        continue
+      }
+
       const extracted = await extractBooking(email.subject, email.body, email.snippet)
 
       if (!extracted || (!extracted.hotel_name && !extracted.client_name)) {

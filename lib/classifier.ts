@@ -25,7 +25,7 @@ CATEGORIES:
 - pre_stay: Arrival time requests, wellness questionnaires, room preference requests, transfer details, pre-stay coordination
 - ops: Internal team emails, admin, industry events, ILTM, webinars, trade shows
 - dispute: Cancellation disputes, overbooking issues, complaint threads, refund requests
-- noise: Newsletters, marketing, promotions, social media, personal finance alerts (SIP, IPO, mutual funds), irrelevant spam
+- noise: Newsletters, marketing, promotions, social media, personal finance alerts (SIP, IPO, mutual funds), irrelevant spam, airline baggage notifications (baggage tracker, checked-in baggage, baggage allowance alerts from Air India or any airline)
 
 ACTION PRIORITY:
 - urgent: Needs response within 4 hours (option expiring, client complaint, live trip issue)
