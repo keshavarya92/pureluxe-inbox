@@ -3,6 +3,7 @@ import { getGmailClient, fetchEmails } from '@/lib/gmail'
 import { classifyBatch } from '@/lib/classifier'
 import { store } from '@/lib/store'
 import { requireAuth } from '@/lib/session'
+import { getUserByEmail, updateLastSync } from '@/lib/users'
 
 export async function POST(req: NextRequest) {
   let session
@@ -17,12 +18,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Sync already in progress' }, { status: 409 })
     }
 
+    const user = await getUserByEmail(session.email!)
+    if (!user?.access_token) {
+      return NextResponse.json({ error: 'No stored credentials — please reconnect' }, { status: 401 })
+    }
+
     const body = await req.json().catch(() => ({}))
     const maxResults = body.maxResults || 20
 
     store.setSyncInProgress(true)
 
-    const gmail = getGmailClient(session.accessToken!, session.refreshToken)
+    const gmail = getGmailClient(user.access_token, user.refresh_token)
 
     const { emails: rawEmails } = await fetchEmails(gmail, {
       maxResults,
@@ -31,6 +37,7 @@ export async function POST(req: NextRequest) {
 
     if (rawEmails.length === 0) {
       store.setSyncInProgress(false)
+      await updateLastSync(user.email)
       return NextResponse.json({
         total: 0, classified: 0, bookings: 0,
         actionRequired: 0, errors: 0,
@@ -55,6 +62,7 @@ export async function POST(req: NextRequest) {
     }
 
     store.setSyncInProgress(false)
+    await updateLastSync(user.email)
     const stats = await store.getStats()
 
     return NextResponse.json({

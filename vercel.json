@@ -8,6 +8,9 @@
     "app/api/sync/route.ts": {
       "maxDuration": 300
     },
+    "app/api/cron/sync/route.ts": {
+      "maxDuration": 300
+    },
     "app/api/emails/route.ts": {
       "maxDuration": 30
     },
@@ -17,5 +20,11 @@
     "app/api/auth/callback/route.ts": {
       "maxDuration": 30
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/sync",
+      "schedule": "*/15 * * * *"
+    }
+  ]
 }

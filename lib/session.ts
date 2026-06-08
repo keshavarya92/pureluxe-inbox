@@ -2,8 +2,6 @@ import { getIronSession, IronSession } from 'iron-session'
 import { cookies } from 'next/headers'
 
 export interface SessionData {
-  accessToken?: string
-  refreshToken?: string
   email?: string
 }
 
@@ -29,7 +27,7 @@ export async function getSession(): Promise<IronSession<SessionData>> {
 
 export async function requireAuth(): Promise<SessionData> {
   const session = await getSession()
-  if (!session.accessToken) {
+  if (!session.email) {
     throw new Error('UNAUTHORIZED')
   }
   return session

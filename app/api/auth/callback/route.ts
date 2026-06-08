@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getTokensFromCode } from '@/lib/gmail'
+import { getTokensFromCode, getEmailAddress } from '@/lib/gmail'
 import { getSession } from '@/lib/session'
+import { upsertUser } from '@/lib/users'
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
@@ -18,13 +19,21 @@ export async function GET(req: NextRequest) {
   try {
     const tokens = await getTokensFromCode(code)
 
-    // Store tokens in encrypted httpOnly cookie — never in URL or client state
+    if (!tokens.access_token) {
+      throw new Error('No access token returned from Google')
+    }
+
+    // Fetch the user's email address from Gmail
+    const email = await getEmailAddress(tokens.access_token)
+
+    // Persist tokens in Supabase — session cookie only carries the email
+    const expiry = tokens.expiry_date ? new Date(tokens.expiry_date) : null
+    await upsertUser(email, tokens.access_token, tokens.refresh_token ?? null, expiry)
+
     const session = await getSession()
-    session.accessToken = tokens.access_token || ''
-    session.refreshToken = tokens.refresh_token || ''
+    session.email = email
     await session.save()
 
-    // Redirect cleanly — no tokens in URL
     return NextResponse.redirect(new URL('/?connected=1', req.url))
   } catch (err: any) {
     return NextResponse.redirect(

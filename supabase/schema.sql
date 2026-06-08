@@ -38,7 +38,7 @@ begin
 end;
 $$;
 
-create trigger inbox_emails_updated_at
+create or replace trigger inbox_emails_updated_at
   before update on inbox_emails
   for each row execute function set_updated_at();
 
@@ -48,3 +48,27 @@ create index if not exists inbox_emails_action_required_idx on inbox_emails (act
 create index if not exists inbox_emails_urgent_idx          on inbox_emails (action_priority) where action_priority = 'urgent';
 create index if not exists inbox_emails_date_idx            on inbox_emails (email_date desc);
 create index if not exists inbox_emails_unread_idx          on inbox_emails (unread) where unread = true;
+
+-- ----------------------------------------------------------------
+-- inbox_users: persists Gmail OAuth tokens per user
+-- ----------------------------------------------------------------
+
+create table if not exists inbox_users (
+  id            uuid        primary key default gen_random_uuid(),
+  email         text        unique not null,
+  access_token  text,
+  refresh_token text,
+  token_expiry  timestamptz,
+  last_sync     timestamptz,
+  active        boolean     not null default true,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+
+grant all on inbox_users to service_role;
+
+create or replace trigger inbox_users_updated_at
+  before update on inbox_users
+  for each row execute function set_updated_at();
+
+create index if not exists inbox_users_active_idx on inbox_users (active) where active = true;

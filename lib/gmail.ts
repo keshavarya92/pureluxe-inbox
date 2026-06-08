@@ -29,13 +29,22 @@ export async function getTokensFromCode(code: string) {
   return tokens
 }
 
-export function getGmailClient(accessToken: string, refreshToken?: string) {
+export function getGmailClient(accessToken: string, refreshToken?: string | null) {
   const oauth2Client = getOAuthClient()
   oauth2Client.setCredentials({
     access_token: accessToken,
-    refresh_token: refreshToken,
+    refresh_token: refreshToken ?? undefined,
   })
   return google.gmail({ version: 'v1', auth: oauth2Client })
+}
+
+export async function getEmailAddress(accessToken: string): Promise<string> {
+  const oauth2Client = getOAuthClient()
+  oauth2Client.setCredentials({ access_token: accessToken })
+  const gmail = google.gmail({ version: 'v1', auth: oauth2Client })
+  const { data } = await gmail.users.getProfile({ userId: 'me' })
+  if (!data.emailAddress) throw new Error('Could not retrieve email address from Gmail')
+  return data.emailAddress
 }
 
 export interface RawEmail {

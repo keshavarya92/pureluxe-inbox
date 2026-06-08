@@ -3,6 +3,7 @@ import { deepExtractBooking } from '@/lib/classifier'
 import { store } from '@/lib/store'
 import { requireAuth } from '@/lib/session'
 import { getGmailClient, fetchEmailById } from '@/lib/gmail'
+import { getUserByEmail } from '@/lib/users'
 
 export async function POST(req: NextRequest) {
   let session
@@ -26,7 +27,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ extracted: 0, message: 'No emails need deep extraction' })
     }
 
-    const gmail = getGmailClient(session.accessToken!, session.refreshToken)
+    const user = await getUserByEmail(session.email!)
+    if (!user?.access_token) {
+      return NextResponse.json({ error: 'No stored credentials — please reconnect' }, { status: 401 })
+    }
+    const gmail = getGmailClient(user.access_token, user.refresh_token)
     let extracted = 0
 
     for (const email of bookingEmails.slice(0, 10)) {
