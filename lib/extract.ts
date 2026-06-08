@@ -255,10 +255,12 @@ export async function runExtraction(): Promise<ExtractionResult> {
   const { data: emails, error: fetchError } = await supabase
     .from('inbox_emails')
     .select('id, subject, body, snippet, inbox_address, booking')
-    .eq('category', 'booking')
     .eq('booking_extracted', false)
     .eq('has_confirmation_attachment', false)
     .not('booking', 'is', null)
+    .not('booking->>property', 'is', null)
+    .not('booking->>checkIn', 'is', null)
+    .not('booking->>checkOut', 'is', null)
     .limit(BATCH_LIMIT)
 
   if (fetchError) throw new Error(fetchError.message)
