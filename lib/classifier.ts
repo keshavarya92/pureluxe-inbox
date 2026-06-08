@@ -94,7 +94,7 @@ Return this exact JSON structure (include all fields, use null for unknown):
   }
 }
 
-If category is not "booking" or "enquiry", set booking fields to null.
+Always attempt to extract booking fields from every email. If no booking data is present, set individual fields to null but still include the booking object.
 If category is not "finance", set finance fields to null.
 If not a supplier, booking, enquiry, or pre_stay email, set supplierContact fields to null.`
 
@@ -136,8 +136,8 @@ export async function classifyEmail(email: RawEmail): Promise<ClassifiedEmail> {
       snippet: email.snippet,
       unread: email.unread,
       ...parsed,
-      // Clean up null booking/finance if not relevant
-      booking: ['booking', 'enquiry'].includes(parsed.category) ? parsed.booking : undefined,
+      // booking extraction runs for all emails — category and extraction are independent
+      booking: parsed.booking ?? undefined,
       finance: parsed.category === 'finance' ? parsed.finance : undefined,
       supplierContact: ['supplier', 'booking', 'enquiry', 'pre_stay'].includes(parsed.category)
         ? parsed.supplierContact
