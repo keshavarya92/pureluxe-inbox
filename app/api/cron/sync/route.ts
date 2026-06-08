@@ -32,7 +32,7 @@ export async function GET(req: NextRequest) {
 
         if (newEmails.length > 0) {
           const classified = await classifyBatch(newEmails)
-          await store.setMany(classified)
+          await store.setMany(classified, user.email)
           newCount = classified.length
         }
       }

@@ -25,6 +25,9 @@ create table if not exists inbox_emails (
   finance            jsonb,
   supplier_contact   jsonb,
 
+  -- Which user's inbox this email belongs to
+  inbox_address      text        not null default '',
+
   synced_at          timestamptz not null default now(),
   updated_at         timestamptz not null default now()
 );
@@ -48,6 +51,10 @@ create index if not exists inbox_emails_action_required_idx on inbox_emails (act
 create index if not exists inbox_emails_urgent_idx          on inbox_emails (action_priority) where action_priority = 'urgent';
 create index if not exists inbox_emails_date_idx            on inbox_emails (email_date desc);
 create index if not exists inbox_emails_unread_idx          on inbox_emails (unread) where unread = true;
+create index if not exists inbox_emails_inbox_address_idx   on inbox_emails (inbox_address);
+
+-- Idempotent migration: add inbox_address to existing tables
+alter table inbox_emails add column if not exists inbox_address text not null default '';
 
 -- ----------------------------------------------------------------
 -- inbox_users: persists Gmail OAuth tokens per user

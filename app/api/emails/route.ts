@@ -3,8 +3,9 @@ import { store } from '@/lib/store'
 import { requireAuth } from '@/lib/session'
 
 export async function GET(req: NextRequest) {
+  let session
   try {
-    await requireAuth()
+    session = await requireAuth()
   } catch {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
@@ -14,8 +15,8 @@ export async function GET(req: NextRequest) {
   const limit = parseInt(searchParams.get('limit') || '100')
 
   const [allEmails, stats] = await Promise.all([
-    store.getByCategory(category),
-    store.getStats(),
+    store.getByCategory(category, session.email),
+    store.getStats(session.email),
   ])
 
   return NextResponse.json({ emails: allEmails.slice(0, limit), stats })

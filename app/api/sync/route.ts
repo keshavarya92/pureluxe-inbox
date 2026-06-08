@@ -53,7 +53,7 @@ export async function POST(req: NextRequest) {
     if (newEmails.length > 0) {
       try {
         const classifiedEmails = await classifyBatch(newEmails)
-        await store.setMany(classifiedEmails)
+        await store.setMany(classifiedEmails, user.email)
         classified = classifiedEmails.length
       } catch (err) {
         console.error('Batch classification error:', err)

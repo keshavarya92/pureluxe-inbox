@@ -5,10 +5,11 @@ import type { ClassifiedEmail, EmailCategory, InboxStats } from '@/types'
 let syncInProgress = false
 let lastSync: Date | null = null
 
-function toRow(e: ClassifiedEmail): Record<string, unknown> {
+function toRow(e: ClassifiedEmail, inboxAddress = ''): Record<string, unknown> {
   return {
     id: e.id,
     thread_id: e.threadId,
+    inbox_address: inboxAddress,
     subject: e.subject,
     from_email: e.from,
     from_name: e.fromName,
@@ -60,18 +61,18 @@ function fromRow(r: Record<string, any>): ClassifiedEmail {
 export const store = {
   // --- Write ---
 
-  async set(email: ClassifiedEmail): Promise<void> {
+  async set(email: ClassifiedEmail, inboxAddress = ''): Promise<void> {
     const { error } = await supabase
       .from('inbox_emails')
-      .upsert(toRow(email), { onConflict: 'id' })
+      .upsert(toRow(email, inboxAddress), { onConflict: 'id' })
     if (error) throw new Error(error.message)
   },
 
-  async setMany(emails: ClassifiedEmail[]): Promise<void> {
+  async setMany(emails: ClassifiedEmail[], inboxAddress = ''): Promise<void> {
     if (emails.length === 0) return
     const { error } = await supabase
       .from('inbox_emails')
-      .upsert(emails.map(toRow), { onConflict: 'id' })
+      .upsert(emails.map(e => toRow(e, inboxAddress)), { onConflict: 'id' })
     if (error) throw new Error(error.message)
     lastSync = new Date()
   },
@@ -96,8 +97,10 @@ export const store = {
     return new Set((data ?? []).map((r: { id: string }) => r.id))
   },
 
-  async getByCategory(category: string): Promise<ClassifiedEmail[]> {
+  async getByCategory(category: string, inboxAddress?: string): Promise<ClassifiedEmail[]> {
     let q = supabase.from('inbox_emails').select('*').order('email_date', { ascending: false })
+
+    if (inboxAddress) q = q.eq('inbox_address', inboxAddress)
 
     if (category === 'action') {
       q = q.eq('action_required', true)
@@ -110,10 +113,12 @@ export const store = {
     return (data ?? []).map(fromRow)
   },
 
-  async getStats(): Promise<InboxStats> {
-    const { data, error } = await supabase
+  async getStats(inboxAddress?: string): Promise<InboxStats> {
+    let q = supabase
       .from('inbox_emails')
       .select('category, unread, action_required, action_priority')
+    if (inboxAddress) q = q.eq('inbox_address', inboxAddress)
+    const { data, error } = await q
     if (error) throw new Error(error.message)
 
     const all = data ?? []
