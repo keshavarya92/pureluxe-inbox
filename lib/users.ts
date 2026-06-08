@@ -46,7 +46,7 @@ export async function getAllActiveUsers(): Promise<InboxUser[]> {
     .eq('active', true)
     .not('access_token', 'is', null)
   if (error) throw new Error(error.message)
-  return data ?? []
+  return (data ?? []) as InboxUser[]
 }
 
 export async function updateLastSync(email: string): Promise<void> {
