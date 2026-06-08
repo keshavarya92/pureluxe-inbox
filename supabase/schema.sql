@@ -27,6 +27,7 @@ create table if not exists inbox_emails (
 
   -- Which user's inbox this email belongs to
   inbox_address      text        not null default '',
+  booking_extracted  boolean     not null default false,
 
   synced_at          timestamptz not null default now(),
   updated_at         timestamptz not null default now()
@@ -53,8 +54,11 @@ create index if not exists inbox_emails_date_idx            on inbox_emails (ema
 create index if not exists inbox_emails_unread_idx          on inbox_emails (unread) where unread = true;
 create index if not exists inbox_emails_inbox_address_idx   on inbox_emails (inbox_address);
 
--- Idempotent migration: add inbox_address to existing tables
-alter table inbox_emails add column if not exists inbox_address text not null default '';
+-- Idempotent migration: add columns to existing tables
+alter table inbox_emails add column if not exists inbox_address     text    not null default '';
+alter table inbox_emails add column if not exists booking_extracted boolean not null default false;
+
+create index if not exists inbox_emails_unextracted_idx on inbox_emails (booking_extracted) where booking_extracted = false;
 
 -- ----------------------------------------------------------------
 -- inbox_users: persists Gmail OAuth tokens per user
