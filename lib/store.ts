@@ -5,9 +5,15 @@ import type { ClassifiedEmail, EmailCategory, InboxStats } from '@/types'
 let syncInProgress = false
 let lastSync: Date | null = null
 
+const ATTACHMENT_PHRASES = /please find attached|kindly find attached|confirmation letter attached|please see attached|booking confirmation attached|voucher attached|find the confirmation|attached herewith|enclosed herewith/i
+
 function parseReceivedAt(dateStr: string): string {
   const d = new Date(dateStr)
   return isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString()
+}
+
+function hasAttachmentPhrase(e: ClassifiedEmail): boolean {
+  return ATTACHMENT_PHRASES.test(e.snippet) || ATTACHMENT_PHRASES.test(e.body ?? '')
 }
 
 function toRow(e: ClassifiedEmail, inboxAddress = ''): Record<string, unknown> {
@@ -35,6 +41,7 @@ function toRow(e: ClassifiedEmail, inboxAddress = ''): Record<string, unknown> {
     booking: e.booking ?? null,
     finance: e.finance ?? null,
     supplier_contact: e.supplierContact ?? null,
+    has_confirmation_attachment: hasAttachmentPhrase(e),
   }
 }
 
