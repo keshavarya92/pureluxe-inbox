@@ -1,5 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from './supabase'
+import { getGmailClient } from './gmail'
+import { processEmailAttachments } from './attachments'
 
 if (!process.env.ANTHROPIC_API_KEY) {
   throw new Error('Missing ANTHROPIC_API_KEY environment variable')
@@ -222,6 +224,18 @@ async function upsertBooking(
   }
 }
 
+async function insertCommission(bookingId: string, extracted: Record<string, unknown>): Promise<void> {
+  if (!extracted.commission_rate && !extracted.commission_expected) return
+  const { error } = await supabase.from('commissions').insert({
+    booking_id:          bookingId,
+    commission_rate:     extracted.commission_rate     ?? null,
+    commission_expected: extracted.commission_expected ?? null,
+    commission_channel:  extracted.commission_channel  ?? null,
+    currency:            extracted.currency            ?? null,
+  })
+  if (error) console.error('commissions insert:', error.message)
+}
+
 const ATTACHMENT_PHRASES = /please find attached|confirmation letter attached|please see attached|kindly find attached|booking confirmation attached|voucher attached/i
 
 function hasConfirmationAttachment(snippet: string | null, body: string | null): boolean {
@@ -229,9 +243,10 @@ function hasConfirmationAttachment(snippet: string | null, body: string | null):
 }
 
 async function markAttachmentPending(emailId: string): Promise<void> {
+  // Only flag — leave booking_extracted = false so the attachment pass can pick it up
   const { error } = await supabase
     .from('inbox_emails')
-    .update({ has_confirmation_attachment: true, booking_extracted: true })
+    .update({ has_confirmation_attachment: true })
     .eq('id', emailId)
   if (error) throw new Error(error.message)
 }
@@ -254,28 +269,29 @@ export interface ExtractionResult {
   updated: number
   skipped: number
   errors: number
+  attachments_processed: number
   timestamp: string
 }
 
 export async function runExtraction(): Promise<ExtractionResult> {
+  // ---- Pass 1: text-based extraction (skip attachment-flagged emails) ----
+
   const { data: emails, error: fetchError } = await supabase
     .from('inbox_emails')
     .select('id, subject, body, snippet, inbox_address')
     .eq('category', 'booking')
     .eq('booking_extracted', false)
+    .eq('has_confirmation_attachment', false)
     .limit(BATCH_LIMIT)
 
   if (fetchError) throw new Error(fetchError.message)
 
-  if (!emails || emails.length === 0) {
-    return { processed: 0, inserted: 0, updated: 0, skipped: 0, errors: 0, timestamp: new Date().toISOString() }
-  }
-
   const results: Array<'inserted' | 'updated' | 'skipped' | 'error'> = []
 
-  for (const email of emails) {
+  for (const email of emails ?? []) {
     try {
       if (hasConfirmationAttachment(email.snippet, email.body)) {
+        // Flag for attachment pass; leave booking_extracted = false
         await markAttachmentPending(email.id)
         results.push('skipped')
         continue
@@ -315,18 +331,104 @@ export async function runExtraction(): Promise<ExtractionResult> {
       await markExtracted(email.id)
       results.push(outcome)
     } catch (err: any) {
-      console.error('Extraction failed for email:', email.id, err)
+      console.error('Text extraction failed for email:', email.id, err)
       await markExtracted(email.id).catch(() => {})
       results.push('error')
     }
   }
 
+  // ---- Pass 2: attachment-based extraction ----
+
+  const { data: attachmentEmails, error: attachFetchError } = await supabase
+    .from('inbox_emails')
+    .select('id, subject, from_email, snippet, inbox_address')
+    .eq('has_confirmation_attachment', true)
+    .eq('booking_extracted', false)
+    .limit(5)
+
+  if (attachFetchError) console.error('Attachment pass fetch error:', attachFetchError.message)
+
+  let attachmentsProcessed = 0
+
+  for (const email of attachmentEmails ?? []) {
+    try {
+      // Look up stored Gmail tokens for this inbox
+      const { data: user } = await supabase
+        .from('inbox_users')
+        .select('access_token, refresh_token')
+        .eq('email', email.inbox_address)
+        .maybeSingle()
+
+      if (!user?.access_token) {
+        console.error('No Gmail tokens for inbox:', email.inbox_address)
+        await markExtracted(email.id)
+        continue
+      }
+
+      const gmail = getGmailClient(user.access_token, user.refresh_token)
+
+      const extracted = await processEmailAttachments(gmail, email.id, {
+        subject:   email.subject,
+        from:      email.from_email,
+        messageId: email.id,
+      })
+
+      if (!extracted || (!extracted.hotel_name && !extracted.client_name)) {
+        await markExtracted(email.id)
+        continue
+      }
+
+      extracted.cancellation_deadline = parseCancellationDeadline(
+        extracted.cancellation_deadline as string | null,
+        extracted.check_in as string | null,
+      )
+
+      const [clientId, propertyId, bookedBy] = await Promise.all([
+        extracted.client_name
+          ? resolveClient(extracted.client_name as string)
+          : Promise.resolve(null),
+        extracted.hotel_name
+          ? resolveProperty(
+              extracted.hotel_name as string,
+              extracted.city as string | null,
+              extracted.country as string | null,
+              extracted.chain as string | null,
+            )
+          : Promise.resolve(null),
+        email.inbox_address
+          ? resolveBookedBy(email.inbox_address)
+          : Promise.resolve(null),
+      ])
+
+      const outcome = await upsertBooking(extracted, email.id, clientId, propertyId, bookedBy)
+
+      // Create commission record if commission data is present
+      if (outcome === 'inserted') {
+        const { data: booking } = await supabase
+          .from('bookings')
+          .select('id')
+          .eq('email_id', email.id)
+          .maybeSingle()
+        if (booking?.id) {
+          await insertCommission(booking.id, extracted)
+        }
+      }
+
+      await markExtracted(email.id)
+      attachmentsProcessed++
+    } catch (err: any) {
+      console.error('Attachment extraction failed for email:', email.id, err)
+      await markExtracted(email.id).catch(() => {})
+    }
+  }
+
   return {
-    processed: emails.length,
-    inserted:  results.filter(r => r === 'inserted').length,
-    updated:   results.filter(r => r === 'updated').length,
-    skipped:   results.filter(r => r === 'skipped').length,
-    errors:    results.filter(r => r === 'error').length,
-    timestamp: new Date().toISOString(),
+    processed:             (emails?.length ?? 0),
+    inserted:              results.filter(r => r === 'inserted').length,
+    updated:               results.filter(r => r === 'updated').length,
+    skipped:               results.filter(r => r === 'skipped').length,
+    errors:                results.filter(r => r === 'error').length,
+    attachments_processed: attachmentsProcessed,
+    timestamp:             new Date().toISOString(),
   }
 }
