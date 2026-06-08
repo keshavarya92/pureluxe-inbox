@@ -51,6 +51,8 @@ export default function InboxPage() {
   const [syncStatus, setSyncStatus] = useState('Not synced yet')
   const [backfilling, setBackfilling] = useState(false)
   const [backfillStatus, setBackfillStatus] = useState<string | null>(null)
+  const [extracting, setExtracting] = useState(false)
+  const [extractStatus, setExtractStatus] = useState<string | null>(null)
   // Fix 1+2: no tokens in state — auth is handled by session cookie server-side
   const [connected, setConnected] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -142,6 +144,28 @@ export default function InboxPage() {
     }
   }, [loadEmails])
 
+  const handleExtract = useCallback(async () => {
+    setExtracting(true)
+    setExtractStatus(null)
+    try {
+      const res = await fetch('/api/cron/extract', {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${process.env.NEXT_PUBLIC_CRON_SECRET}` },
+      })
+      const result = await res.json()
+      if (!res.ok) throw new Error(result.error)
+      if (result.processed === 0) {
+        setExtractStatus('No bookings to extract')
+      } else {
+        setExtractStatus(`Extracted ${result.inserted + result.updated} bookings · ${result.skipped} skipped`)
+      }
+    } catch (err: any) {
+      setExtractStatus(`Error: ${err.message}`)
+    } finally {
+      setExtracting(false)
+    }
+  }, [])
+
   const handleConnect = async () => {
     const res = await fetch('/api/auth')
     const { url } = await res.json()
@@ -175,13 +199,19 @@ export default function InboxPage() {
           </div>
           {connected && (
             <>
+              {extractStatus && (
+                <span style={{ fontSize:11, color:'#4A4438' }}>{extractStatus}</span>
+              )}
               {backfillStatus && (
                 <span style={{ fontSize:11, color:'#4A4438' }}>{backfillStatus}</span>
               )}
-              <button onClick={handleBackfill} disabled={backfilling || syncing} style={{ padding:'6px 14px', fontSize:12, borderRadius:4, border:'1px solid #2A2820', background:'transparent', color: backfilling ? '#4A4438' : '#6B6558', cursor: backfilling || syncing ? 'not-allowed':'pointer', letterSpacing:'0.06em', opacity: backfilling || syncing ? 0.5:1 }}>
+              <button onClick={handleExtract} disabled={extracting || backfilling || syncing} style={{ padding:'6px 14px', fontSize:12, borderRadius:4, border:'1px solid #2A2820', background:'transparent', color: extracting ? '#4A4438' : '#6B6558', cursor: extracting || backfilling || syncing ? 'not-allowed':'pointer', letterSpacing:'0.06em', opacity: extracting || backfilling || syncing ? 0.5:1 }}>
+                {extracting ? 'Extracting...' : 'Extract bookings'}
+              </button>
+              <button onClick={handleBackfill} disabled={backfilling || syncing || extracting} style={{ padding:'6px 14px', fontSize:12, borderRadius:4, border:'1px solid #2A2820', background:'transparent', color: backfilling ? '#4A4438' : '#6B6558', cursor: backfilling || syncing || extracting ? 'not-allowed':'pointer', letterSpacing:'0.06em', opacity: backfilling || syncing || extracting ? 0.5:1 }}>
                 {backfilling ? 'Backfilling...' : 'Backfill inbox'}
               </button>
-              <button onClick={handleSync} disabled={syncing || backfilling} style={{ padding:'6px 14px', fontSize:12, borderRadius:4, border:'1px solid #2A2820', background:'transparent', color:'#B89A5A', cursor: syncing || backfilling ? 'not-allowed':'pointer', letterSpacing:'0.06em', opacity: syncing || backfilling ? 0.5:1 }}>
+              <button onClick={handleSync} disabled={syncing || backfilling || extracting} style={{ padding:'6px 14px', fontSize:12, borderRadius:4, border:'1px solid #2A2820', background:'transparent', color:'#B89A5A', cursor: syncing || backfilling || extracting ? 'not-allowed':'pointer', letterSpacing:'0.06em', opacity: syncing || backfilling || extracting ? 0.5:1 }}>
                 {syncing ? 'Syncing...' : 'Sync inbox'}
               </button>
             </>
