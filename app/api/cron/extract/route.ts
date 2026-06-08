@@ -106,7 +106,7 @@ async function markExtracted(emailId: string): Promise<void> {
   if (error) throw new Error(error.message)
 }
 
-export async function GET(req: NextRequest) {
+async function handler(req: NextRequest) {
   const auth = req.headers.get('authorization')
   if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -166,3 +166,6 @@ export async function GET(req: NextRequest) {
     timestamp: new Date().toISOString(),
   })
 }
+
+export const GET = handler
+export const POST = handler
