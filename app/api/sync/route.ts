@@ -5,7 +5,6 @@ import { store } from '@/lib/store'
 import { requireAuth } from '@/lib/session'
 
 export async function POST(req: NextRequest) {
-  // Fix 3: require auth on every request
   let session
   try {
     session = await requireAuth()
@@ -23,7 +22,6 @@ export async function POST(req: NextRequest) {
 
     store.setSyncInProgress(true)
 
-    // Use tokens from session — not from request body
     const gmail = getGmailClient(session.accessToken!, session.refreshToken)
 
     const { emails: rawEmails } = await fetchEmails(gmail, {
@@ -40,14 +38,15 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    const newEmails = rawEmails.filter(e => !store.get(e.id))
+    const existingIds = await store.getExistingIds(rawEmails.map(e => e.id))
+    const newEmails = rawEmails.filter(e => !existingIds.has(e.id))
     let classified = 0
     let errors = 0
 
     if (newEmails.length > 0) {
       try {
         const classifiedEmails = await classifyBatch(newEmails)
-        store.setMany(classifiedEmails)
+        await store.setMany(classifiedEmails)
         classified = classifiedEmails.length
       } catch (err) {
         console.error('Batch classification error:', err)
@@ -56,7 +55,7 @@ export async function POST(req: NextRequest) {
     }
 
     store.setSyncInProgress(false)
-    const stats = store.getStats()
+    const stats = await store.getStats()
 
     return NextResponse.json({
       total: rawEmails.length,
@@ -80,10 +79,12 @@ export async function GET() {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
+  const [total, stats] = await Promise.all([store.size(), store.getStats()])
+
   return NextResponse.json({
     lastSync: store.getLastSync(),
-    total: store.size(),
+    total,
     syncing: store.isSyncing(),
-    stats: store.getStats(),
+    stats,
   })
 }

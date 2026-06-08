@@ -3,7 +3,6 @@ import { store } from '@/lib/store'
 import { requireAuth } from '@/lib/session'
 
 export async function GET(req: NextRequest) {
-  // Fix 3: require auth
   try {
     await requireAuth()
   } catch {
@@ -14,8 +13,10 @@ export async function GET(req: NextRequest) {
   const category = searchParams.get('category') || 'all'
   const limit = parseInt(searchParams.get('limit') || '100')
 
-  const emails = store.getByCategory(category).slice(0, limit)
-  const stats = store.getStats()
+  const [allEmails, stats] = await Promise.all([
+    store.getByCategory(category),
+    store.getStats(),
+  ])
 
-  return NextResponse.json({ emails, stats })
+  return NextResponse.json({ emails: allEmails.slice(0, limit), stats })
 }

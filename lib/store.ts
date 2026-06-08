@@ -1,92 +1,152 @@
-import type { ClassifiedEmail, InboxStats } from '@/types'
+import { supabase } from './supabase'
+import type { ClassifiedEmail, EmailCategory, InboxStats } from '@/types'
 
-// In-memory store - will be replaced with Supabase in Phase 2
-// Uses a Map for O(1) lookups by email ID
+// Transient state — fine to keep in-memory (no need to survive restarts)
+let syncInProgress = false
+let lastSync: Date | null = null
 
-class EmailStore {
-  private emails: Map<string, ClassifiedEmail> = new Map()
-  private lastSync: Date | null = null
-  private syncInProgress: boolean = false
-
-  set(email: ClassifiedEmail) {
-    this.emails.set(email.id, email)
+function toRow(e: ClassifiedEmail): Record<string, unknown> {
+  return {
+    id: e.id,
+    thread_id: e.threadId,
+    subject: e.subject,
+    from_email: e.from,
+    from_name: e.fromName,
+    to_addresses: e.to,
+    cc_addresses: e.cc,
+    email_date: e.date,
+    snippet: e.snippet,
+    body: e.body ?? null,
+    unread: e.unread,
+    category: e.category,
+    tags: e.tags,
+    summary: e.summary,
+    action_required: e.actionRequired,
+    action_priority: e.actionPriority,
+    action_description: e.actionDescription ?? null,
+    unanswered_hours: e.unansweredHours ?? null,
+    booking: e.booking ?? null,
+    finance: e.finance ?? null,
+    supplier_contact: e.supplierContact ?? null,
   }
+}
 
-  setMany(emails: ClassifiedEmail[]) {
-    for (const email of emails) {
-      this.emails.set(email.id, email)
+function fromRow(r: Record<string, any>): ClassifiedEmail {
+  return {
+    id: r.id,
+    threadId: r.thread_id,
+    subject: r.subject,
+    from: r.from_email,
+    fromName: r.from_name,
+    to: r.to_addresses ?? [],
+    cc: r.cc_addresses ?? [],
+    date: r.email_date,
+    snippet: r.snippet,
+    body: r.body ?? undefined,
+    unread: r.unread,
+    category: r.category,
+    tags: r.tags ?? [],
+    summary: r.summary,
+    actionRequired: r.action_required,
+    actionPriority: r.action_priority,
+    actionDescription: r.action_description ?? undefined,
+    unansweredHours: r.unanswered_hours ?? undefined,
+    booking: r.booking ?? undefined,
+    finance: r.finance ?? undefined,
+    supplierContact: r.supplier_contact ?? undefined,
+  }
+}
+
+export const store = {
+  // --- Write ---
+
+  async set(email: ClassifiedEmail): Promise<void> {
+    const { error } = await supabase
+      .from('inbox_emails')
+      .upsert(toRow(email), { onConflict: 'id' })
+    if (error) throw new Error(error.message)
+  },
+
+  async setMany(emails: ClassifiedEmail[]): Promise<void> {
+    if (emails.length === 0) return
+    const { error } = await supabase
+      .from('inbox_emails')
+      .upsert(emails.map(toRow), { onConflict: 'id' })
+    if (error) throw new Error(error.message)
+    lastSync = new Date()
+  },
+
+  // --- Read ---
+
+  async get(id: string): Promise<ClassifiedEmail | undefined> {
+    const { data, error } = await supabase
+      .from('inbox_emails')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle()
+    if (error) throw new Error(error.message)
+    return data ? fromRow(data) : undefined
+  },
+
+  // Returns the subset of `ids` that already exist in the DB — used to skip re-classification
+  async getExistingIds(ids: string[]): Promise<Set<string>> {
+    if (ids.length === 0) return new Set()
+    const { data, error } = await supabase.from('inbox_emails').select('id').in('id', ids)
+    if (error) throw new Error(error.message)
+    return new Set((data ?? []).map((r: { id: string }) => r.id))
+  },
+
+  async getByCategory(category: string): Promise<ClassifiedEmail[]> {
+    let q = supabase.from('inbox_emails').select('*').order('email_date', { ascending: false })
+
+    if (category === 'action') {
+      q = q.eq('action_required', true)
+    } else if (category !== 'all') {
+      q = q.eq('category', category)
     }
-    this.lastSync = new Date()
-  }
 
-  get(id: string): ClassifiedEmail | undefined {
-    return this.emails.get(id)
-  }
+    const { data, error } = await q
+    if (error) throw new Error(error.message)
+    return (data ?? []).map(fromRow)
+  },
 
-  getAll(): ClassifiedEmail[] {
-    return Array.from(this.emails.values()).sort(
-      (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
-    )
-  }
+  async getStats(): Promise<InboxStats> {
+    const { data, error } = await supabase
+      .from('inbox_emails')
+      .select('category, unread, action_required, action_priority')
+    if (error) throw new Error(error.message)
 
-  getByCategory(category: string): ClassifiedEmail[] {
-    if (category === 'all') return this.getAll()
-    if (category === 'action') return this.getAll().filter(e => e.actionRequired)
-    return this.getAll().filter(e => e.category === category)
-  }
-
-  getStats(): InboxStats {
-    const all = this.getAll()
-    const byCategory: any = {
+    const all = data ?? []
+    const byCategory: Record<string, number> = {
       booking: 0, client: 0, supplier: 0, finance: 0,
       ops: 0, pre_stay: 0, dispute: 0, noise: 0,
     }
-
-    for (const email of all) {
-      if (byCategory[email.category] !== undefined) {
-        byCategory[email.category]++
-      }
+    for (const r of all) {
+      if (r.category in byCategory) byCategory[r.category]++
     }
 
     return {
       total: all.length,
-      unread: all.filter(e => e.unread).length,
-      actionRequired: all.filter(e => e.actionRequired).length,
-      bookings: all.filter(e => e.category === 'booking').length,
-      urgent: all.filter(e => e.actionPriority === 'urgent').length,
-      byCategory,
+      unread: all.filter(r => r.unread).length,
+      actionRequired: all.filter(r => r.action_required).length,
+      bookings: byCategory.booking,
+      urgent: all.filter(r => r.action_priority === 'urgent').length,
+      byCategory: byCategory as Record<EmailCategory, number>,
     }
-  }
+  },
 
-  setLastSync(date: Date) {
-    this.lastSync = date
-  }
+  async size(): Promise<number> {
+    const { count, error } = await supabase
+      .from('inbox_emails')
+      .select('id', { count: 'exact', head: true })
+    if (error) throw new Error(error.message)
+    return count ?? 0
+  },
 
-  getLastSync(): Date | null {
-    return this.lastSync
-  }
+  // --- Sync state (in-memory) ---
 
-  setSyncInProgress(val: boolean) {
-    this.syncInProgress = val
-  }
-
-  isSyncing(): boolean {
-    return this.syncInProgress
-  }
-
-  size(): number {
-    return this.emails.size
-  }
-
-  clear() {
-    this.emails.clear()
-  }
+  isSyncing: () => syncInProgress,
+  setSyncInProgress: (val: boolean) => { syncInProgress = val },
+  getLastSync: () => lastSync,
+  setLastSync: (date: Date) => { lastSync = date },
 }
-
-// Singleton — persists across requests in the same Node.js process
-const globalStore = global as any
-if (!globalStore._emailStore) {
-  globalStore._emailStore = new EmailStore()
-}
-
-export const store: EmailStore = globalStore._emailStore
