@@ -8,6 +8,9 @@
     "app/api/sync/route.ts": {
       "maxDuration": 300
     },
+    "app/api/backfill/route.ts": {
+      "maxDuration": 300
+    },
     "app/api/cron/sync/route.ts": {
       "maxDuration": 300
     },

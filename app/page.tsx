@@ -49,6 +49,8 @@ export default function InboxPage() {
   const [selectedEmail, setSelectedEmail] = useState<ClassifiedEmail | null>(null)
   const [syncing, setSyncing] = useState(false)
   const [syncStatus, setSyncStatus] = useState('Not synced yet')
+  const [backfilling, setBackfilling] = useState(false)
+  const [backfillStatus, setBackfillStatus] = useState<string | null>(null)
   // Fix 1+2: no tokens in state — auth is handled by session cookie server-side
   const [connected, setConnected] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -115,6 +117,31 @@ export default function InboxPage() {
     }
   }, [connected]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  const handleBackfill = useCallback(async () => {
+    setBackfilling(true)
+    setBackfillStatus(null)
+    try {
+      const res = await fetch('/api/backfill', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ maxTotal: 200 }),
+      })
+      if (res.status === 401) {
+        setConnected(false)
+        setBackfillStatus('Session expired — reconnect Gmail')
+        return
+      }
+      const result = await res.json()
+      if (!res.ok) throw new Error(result.error)
+      await loadEmails()
+      setBackfillStatus(`Backfilled ${result.classified} emails`)
+    } catch (err: any) {
+      setBackfillStatus(`Error: ${err.message}`)
+    } finally {
+      setBackfilling(false)
+    }
+  }, [loadEmails])
+
   const handleConnect = async () => {
     const res = await fetch('/api/auth')
     const { url } = await res.json()
@@ -147,9 +174,17 @@ export default function InboxPage() {
             {syncStatus}
           </div>
           {connected && (
-            <button onClick={handleSync} disabled={syncing} style={{ padding:'6px 14px', fontSize:12, borderRadius:4, border:'1px solid #2A2820', background:'transparent', color:'#B89A5A', cursor: syncing ? 'not-allowed':'pointer', letterSpacing:'0.06em', opacity: syncing ? 0.5:1 }}>
-              {syncing ? 'Syncing...' : 'Sync inbox'}
-            </button>
+            <>
+              {backfillStatus && (
+                <span style={{ fontSize:11, color:'#4A4438' }}>{backfillStatus}</span>
+              )}
+              <button onClick={handleBackfill} disabled={backfilling || syncing} style={{ padding:'6px 14px', fontSize:12, borderRadius:4, border:'1px solid #2A2820', background:'transparent', color: backfilling ? '#4A4438' : '#6B6558', cursor: backfilling || syncing ? 'not-allowed':'pointer', letterSpacing:'0.06em', opacity: backfilling || syncing ? 0.5:1 }}>
+                {backfilling ? 'Backfilling...' : 'Backfill inbox'}
+              </button>
+              <button onClick={handleSync} disabled={syncing || backfilling} style={{ padding:'6px 14px', fontSize:12, borderRadius:4, border:'1px solid #2A2820', background:'transparent', color:'#B89A5A', cursor: syncing || backfilling ? 'not-allowed':'pointer', letterSpacing:'0.06em', opacity: syncing || backfilling ? 0.5:1 }}>
+                {syncing ? 'Syncing...' : 'Sync inbox'}
+              </button>
+            </>
           )}
           {!connected && (
             <button onClick={handleConnect} style={{ padding:'6px 16px', fontSize:12, borderRadius:4, border:'1px solid #B89A5A', background:'#B89A5A', color:'#0F0F0D', cursor:'pointer', letterSpacing:'0.06em', fontWeight:600 }}>
