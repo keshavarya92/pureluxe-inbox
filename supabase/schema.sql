@@ -7,6 +7,7 @@ create table if not exists inbox_emails (
   to_addresses       text[]      not null default '{}',
   cc_addresses       text[]      not null default '{}',
   email_date         text        not null,
+  received_at        timestamptz not null default now(),
   snippet            text        not null default '',
   body               text,
   unread             boolean     not null default true,
@@ -57,6 +58,7 @@ create index if not exists inbox_emails_inbox_address_idx   on inbox_emails (inb
 
 -- Idempotent migration: add columns to existing tables
 alter table inbox_emails add column if not exists inbox_address     text    not null default '';
+alter table inbox_emails add column if not exists received_at                timestamptz not null default now();
 alter table inbox_emails add column if not exists booking_extracted           boolean not null default false;
 alter table inbox_emails add column if not exists has_confirmation_attachment boolean not null default false;
 

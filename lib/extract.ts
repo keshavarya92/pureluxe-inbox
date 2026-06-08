@@ -1,56 +1,8 @@
-import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from './supabase'
 import { getGmailClient } from './gmail'
 import { processEmailAttachments } from './attachments'
 
-if (!process.env.ANTHROPIC_API_KEY) {
-  throw new Error('Missing ANTHROPIC_API_KEY environment variable')
-}
-
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
-
 const BATCH_LIMIT = 10
-
-const SYSTEM = `You are a booking data extraction system for PureLuxe, a luxury travel agency based in Mumbai (KFT Corporation).
-Extract structured booking data from hotel confirmation emails, option emails, and rate quotes.
-Respond ONLY with valid JSON. No markdown, no explanation, no backticks.`
-
-function buildPrompt(subject: string, body: string | null, snippet: string): string {
-  return `Extract all booking data from this email.
-
-SUBJECT: ${subject}
-BODY:
-${body || snippet}
-
-Return this exact JSON (use null for any field you cannot find with confidence):
-{
-  "client_name": "Full client name or null",
-  "hotel_name": "Hotel or resort name or null",
-  "city": "City or null",
-  "country": "Country or null",
-  "chain": "Hotel chain/brand or null",
-  "check_in": "YYYY-MM-DD or null",
-  "check_out": "YYYY-MM-DD or null",
-  "num_rooms": number or null,
-  "num_adults": number or null,
-  "total_cost": number or null,
-  "currency": "3-letter currency code or null",
-  "total_cost_usd": number or null,
-  "commission_rate": number or null,
-  "commission_expected": number or null,
-  "commission_channel": "channel name or null",
-  "amadeus_ref": "Amadeus PNR or null",
-  "lhw_ref": "LHW reference number or null",
-  "hotel_ref": "Hotel confirmation number or null",
-  "booking_source": "AMADEUS or LHW or DIRECT or ONYX or null",
-  "status": "confirmed or option or cancelled or null",
-  "booked_by_name": "Name of agent/person who made the booking or null",
-  "cancellation_deadline": "YYYY-MM-DD or null",
-  "cancellation_policy": "Cancellation policy text or null",
-  "special_occasion": "Birthday/anniversary/honeymoon/etc or null",
-  "vip_flag": true or false
-}`
-}
 
 // ----------------------------------------------------------------
 // Relationship resolution
@@ -142,24 +94,27 @@ export function parseCancellationDeadline(value: string | null, checkIn: string 
 }
 
 // ----------------------------------------------------------------
-// Claude extraction
+// Map Haiku's booking JSONB to bookings table columns
 // ----------------------------------------------------------------
 
-async function extractBooking(subject: string, body: string | null, snippet: string): Promise<Record<string, unknown> | null> {
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 1024,
-    system: SYSTEM,
-    messages: [{ role: 'user', content: buildPrompt(subject, body, snippet) }],
-  })
-
-  const text = response.content
-    .filter(b => b.type === 'text')
-    .map(b => (b as { type: 'text'; text: string }).text)
-    .join('')
-
-  const cleaned = text.replace(/```json|```/g, '').trim()
-  return JSON.parse(cleaned)
+function mapBookingJson(b: Record<string, any>): Record<string, unknown> {
+  return {
+    client_name:         b.clientName         ?? null,
+    hotel_name:          b.property           ?? null,
+    check_in:            b.checkIn            ?? null,
+    check_out:           b.checkOut           ?? null,
+    num_rooms:           b.rooms              ?? null,
+    num_adults:          b.guests             ?? null,
+    total_cost:          b.totalAmount        ?? null,
+    currency:            b.currency           ?? null,
+    status:              b.status             ?? null,
+    amadeus_ref:         b.gdsRef             ?? null,
+    hotel_ref:           b.confirmationNumber ?? null,
+    commission_rate:     b.commissionRate     ?? null,
+    commission_expected: b.commissionAmount   ?? null,
+    booking_source:      b.gdsRef ? 'AMADEUS' : null,
+    notes:               b.cancellationDeadline ?? null,
+  }
 }
 
 // ----------------------------------------------------------------
@@ -211,6 +166,7 @@ async function upsertBooking(
     cancellation_policy:   extracted.cancellation_policy   ?? null,
     special_occasion:      extracted.special_occasion      ?? null,
     vip_flag:              extracted.vip_flag              ?? false,
+    notes:                 extracted.notes                 ?? null,
   }
 
   if (existingId) {
@@ -274,14 +230,15 @@ export interface ExtractionResult {
 }
 
 export async function runExtraction(): Promise<ExtractionResult> {
-  // ---- Pass 1: text-based extraction (skip attachment-flagged emails) ----
+  // ---- Pass 1: read booking JSONB written by Haiku during classification ----
 
   const { data: emails, error: fetchError } = await supabase
     .from('inbox_emails')
-    .select('id, subject, body, snippet, inbox_address')
+    .select('id, subject, body, snippet, inbox_address, booking')
     .eq('category', 'booking')
     .eq('booking_extracted', false)
     .eq('has_confirmation_attachment', false)
+    .not('booking', 'is', null)
     .limit(BATCH_LIMIT)
 
   if (fetchError) throw new Error(fetchError.message)
@@ -297,30 +254,20 @@ export async function runExtraction(): Promise<ExtractionResult> {
         continue
       }
 
-      const extracted = await extractBooking(email.subject, email.body, email.snippet)
+      const extracted = mapBookingJson(email.booking as Record<string, any>)
 
-      if (!extracted || (!extracted.hotel_name && !extracted.client_name)) {
+      if (!extracted.hotel_name && !extracted.client_name) {
         await markExtracted(email.id)
         results.push('skipped')
         continue
       }
-
-      extracted.cancellation_deadline = parseCancellationDeadline(
-        extracted.cancellation_deadline as string | null,
-        extracted.check_in as string | null,
-      )
 
       const [clientId, propertyId, bookedBy] = await Promise.all([
         extracted.client_name
           ? resolveClient(extracted.client_name as string)
           : Promise.resolve(null),
         extracted.hotel_name
-          ? resolveProperty(
-              extracted.hotel_name as string,
-              extracted.city as string | null,
-              extracted.country as string | null,
-              extracted.chain as string | null,
-            )
+          ? resolveProperty(extracted.hotel_name as string, null, null, null)
           : Promise.resolve(null),
         email.inbox_address
           ? resolveBookedBy(email.inbox_address)
@@ -331,13 +278,13 @@ export async function runExtraction(): Promise<ExtractionResult> {
       await markExtracted(email.id)
       results.push(outcome)
     } catch (err: any) {
-      console.error('Text extraction failed for email:', email.id, err)
+      console.error('JSONB extraction failed for email:', email.id, err)
       await markExtracted(email.id).catch(() => {})
       results.push('error')
     }
   }
 
-  // ---- Pass 2: attachment-based extraction ----
+  // ---- Pass 2: attachment-based extraction via Sonnet ----
 
   const { data: attachmentEmails, error: attachFetchError } = await supabase
     .from('inbox_emails')
@@ -352,7 +299,6 @@ export async function runExtraction(): Promise<ExtractionResult> {
 
   for (const email of attachmentEmails ?? []) {
     try {
-      // Look up stored Gmail tokens for this inbox
       const { data: user } = await supabase
         .from('inbox_users')
         .select('access_token, refresh_token')
@@ -402,7 +348,6 @@ export async function runExtraction(): Promise<ExtractionResult> {
 
       const outcome = await upsertBooking(extracted, email.id, clientId, propertyId, bookedBy)
 
-      // Create commission record if commission data is present
       if (outcome === 'inserted') {
         const { data: booking } = await supabase
           .from('bookings')

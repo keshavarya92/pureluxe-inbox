@@ -5,11 +5,17 @@ import type { ClassifiedEmail, EmailCategory, InboxStats } from '@/types'
 let syncInProgress = false
 let lastSync: Date | null = null
 
+function parseReceivedAt(dateStr: string): string {
+  const d = new Date(dateStr)
+  return isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString()
+}
+
 function toRow(e: ClassifiedEmail, inboxAddress = ''): Record<string, unknown> {
   return {
     id: e.id,
     thread_id: e.threadId,
     inbox_address: inboxAddress,
+    received_at: parseReceivedAt(e.date),
     subject: e.subject,
     from_email: e.from,
     from_name: e.fromName,
