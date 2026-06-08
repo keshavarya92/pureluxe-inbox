@@ -1,3 +1,33 @@
+// bookings table columns written by upsertBooking:
+//   email_id
+//   client_id          (UUID FK → clients)
+//   client_name        (denormalised text, always written)
+//   property_id        (UUID FK → properties)
+//   hotel_name         (denormalised text, always written)
+//   city               (denormalised text, always written)
+//   booked_by          (UUID FK → team_members)
+//   booked_by_name     (denormalised text = inbox_address, always written)
+//   check_in
+//   check_out
+//   num_rooms
+//   num_adults
+//   total_cost
+//   currency
+//   total_cost_usd
+//   commission_rate
+//   commission_expected
+//   commission_channel
+//   amadeus_ref
+//   lhw_ref
+//   hotel_ref
+//   booking_source
+//   status
+//   cancellation_deadline
+//   cancellation_policy
+//   special_occasion
+//   vip_flag
+//   notes
+
 import { supabase } from './supabase'
 import { getGmailClient } from './gmail'
 import { processEmailAttachments } from './attachments'
@@ -119,6 +149,7 @@ function mapBookingJson(b: Record<string, any>): Record<string, unknown> {
   return {
     client_name:         b.clientName         ?? null,
     hotel_name:          b.property           ?? null,
+    city:                b.city               ?? null,
     check_in:            toISODate(b.checkIn),
     check_out:           toISODate(b.checkOut),
     num_rooms:           b.rooms              ?? null,
@@ -163,8 +194,12 @@ async function upsertBooking(
   const payload: Record<string, unknown> = {
     email_id:              emailId,
     client_id:             clientId,
+    client_name:           extracted.client_name           ?? null,
     property_id:           propertyId,
+    hotel_name:            extracted.hotel_name            ?? null,
+    city:                  extracted.city                  ?? null,
     booked_by:             bookedBy,
+    booked_by_name:        extracted.booked_by_name        ?? null,
     check_in:              extracted.check_in              ?? null,
     check_out:             extracted.check_out             ?? null,
     num_rooms:             extracted.num_rooms             ?? null,
@@ -285,8 +320,19 @@ export async function runExtraction(): Promise<ExtractionResult> {
 
       const extracted = mapBookingJson(email.booking as Record<string, any>)
 
+      // Denormalised text — always set from JSONB regardless of UUID lookup outcome
+      extracted.booked_by_name = email.inbox_address || null
+
       // Skip only if we have neither a client nor a property — a partial record is fine
       if (!extracted.client_name && !extracted.hotel_name) {
+        await markExtracted(email.id)
+        results.push('skipped')
+        continue
+      }
+
+      // Must have at least one reference number — no ref means it's an enquiry, not a confirmed booking
+      if (!extracted.amadeus_ref && !extracted.hotel_ref) {
+        console.log('Skipping (no confirmation number):', email.id, email.subject)
         await markExtracted(email.id)
         results.push('skipped')
         continue
@@ -296,15 +342,16 @@ export async function runExtraction(): Promise<ExtractionResult> {
       if (!extracted.hotel_name) extracted.hotel_name = 'Unknown'
 
       console.log('Upserting booking:', {
-        emailId:     email.id,
-        subject:     email.subject,
-        client_name: extracted.client_name,
-        hotel_name:  extracted.hotel_name,
-        check_in:    extracted.check_in,
-        check_out:   extracted.check_out,
-        status:      extracted.status,
-        amadeus_ref: extracted.amadeus_ref,
-        hotel_ref:   extracted.hotel_ref,
+        emailId:       email.id,
+        subject:       email.subject,
+        client_name:   extracted.client_name,
+        hotel_name:    extracted.hotel_name,
+        check_in:      extracted.check_in,
+        check_out:     extracted.check_out,
+        status:        extracted.status,
+        amadeus_ref:   extracted.amadeus_ref,
+        hotel_ref:     extracted.hotel_ref,
+        booked_by_name: extracted.booked_by_name,
       })
 
       const [clientId, propertyId, bookedBy] = await Promise.all([
