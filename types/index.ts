@@ -9,8 +9,6 @@ export type EmailCategory =
   | 'dispute'
   | 'noise'
 
-export type EmailStatus = 'unread' | 'read' | 'actioned'
-
 export type ActionPriority = 'urgent' | 'high' | 'normal' | 'low' | 'none'
 
 export interface ClassifiedEmail {
@@ -26,16 +24,16 @@ export interface ClassifiedEmail {
   body?: string
   unread: boolean
 
-  // Classification
-  category: EmailCategory
-  tags: EmailCategory[]
-  summary: string
-  actionRequired: boolean
-  actionPriority: ActionPriority
+  // Classification — present on legacy emails, absent on newly synced ones
+  category?: EmailCategory
+  tags?: string[]
+  summary?: string
+  actionRequired?: boolean
+  actionPriority?: ActionPriority
   actionDescription?: string
   unansweredHours?: number
 
-  // Extracted booking data (if category === 'booking')
+  // Legacy JSONB extraction fields (present on older emails)
   booking?: {
     clientName?: string
     property?: string
@@ -52,25 +50,21 @@ export interface ClassifiedEmail {
     netAmount?: number
     commissionRate?: number
     commissionAmount?: number
-    status?: 'enquiry' | 'quote' | 'option' | 'confirmed' | 'cancelled' | 'completed'
+    status?: string
     cancellationDeadline?: string
     cancellationPolicy?: string
-    paymentStatus?: 'unpaid' | 'deposit' | 'part_paid' | 'fully_paid'
+    paymentStatus?: string
     supplier?: string
     supplierEmail?: string
-    programme?: string // for wellness bookings
+    programme?: string
   }
-
-  // Extracted financial data
   finance?: {
     amount?: number
     currency?: string
-    type?: 'invoice' | 'payment' | 'cancellation' | 'refund' | 'deposit'
+    type?: string
     reference?: string
     dueDate?: string
   }
-
-  // Supplier info
   supplierContact?: {
     name?: string
     email?: string
@@ -81,9 +75,7 @@ export interface ClassifiedEmail {
 
 export interface SyncResult {
   total: number
-  classified: number
-  bookings: number
-  actionRequired: number
+  stored: number
   errors: number
   timestamp: string
 }
@@ -91,8 +83,4 @@ export interface SyncResult {
 export interface InboxStats {
   total: number
   unread: number
-  actionRequired: number
-  bookings: number
-  urgent: number
-  byCategory: Record<EmailCategory, number>
 }

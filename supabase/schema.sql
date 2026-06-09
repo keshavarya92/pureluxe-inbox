@@ -12,7 +12,7 @@ create table if not exists inbox_emails (
   body               text,
   unread             boolean     not null default true,
 
-  -- Classification
+  -- Classification (no longer populated — kept for legacy data, do not drop yet)
   category           text        not null,
   tags               text[]      not null default '{}',
   summary            text        not null default '',
@@ -21,7 +21,7 @@ create table if not exists inbox_emails (
   action_description text,
   unanswered_hours   integer,
 
-  -- Extracted structured data (JSONB)
+  -- Legacy JSONB extraction (no longer written — kept for historical data)
   booking            jsonb,
   finance            jsonb,
   supplier_contact   jsonb,

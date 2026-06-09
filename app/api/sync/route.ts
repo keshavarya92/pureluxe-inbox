@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getGmailClient, fetchEmails } from '@/lib/gmail'
-import { classifyBatch } from '@/lib/classifier'
 import { store } from '@/lib/store'
 import { requireAuth } from '@/lib/session'
 import { getUserByEmail, updateLastSync } from '@/lib/users'
@@ -29,47 +28,32 @@ export async function POST(req: NextRequest) {
     store.setSyncInProgress(true)
 
     const gmail = getGmailClient(user.access_token, user.refresh_token)
+    const { emails: rawEmails } = await fetchEmails(gmail, { maxResults, query: 'in:inbox' })
 
-    const { emails: rawEmails } = await fetchEmails(gmail, {
-      maxResults,
-      query: 'in:inbox',
-    })
-
-    if (rawEmails.length === 0) {
-      store.setSyncInProgress(false)
-      await updateLastSync(user.email)
-      return NextResponse.json({
-        total: 0, classified: 0, bookings: 0,
-        actionRequired: 0, errors: 0,
-        timestamp: new Date().toISOString(),
-      })
-    }
-
-    const existingIds = await store.getExistingIds(rawEmails.map(e => e.id))
-    const newEmails = rawEmails.filter(e => !existingIds.has(e.id))
-    let classified = 0
+    let stored = 0
     let errors = 0
 
-    if (newEmails.length > 0) {
-      try {
-        const classifiedEmails = await classifyBatch(newEmails)
-        await store.setMany(classifiedEmails, user.email)
-        classified = classifiedEmails.length
-      } catch (err) {
-        console.error('Batch classification error:', err)
-        errors++
+    if (rawEmails.length > 0) {
+      const existingIds = await store.getExistingIds(rawEmails.map(e => e.id))
+      const newEmails = rawEmails.filter(e => !existingIds.has(e.id))
+
+      if (newEmails.length > 0) {
+        try {
+          await store.setMany(newEmails, user.email)
+          stored = newEmails.length
+        } catch (err) {
+          console.error('Store error during sync:', err)
+          errors++
+        }
       }
     }
 
     store.setSyncInProgress(false)
     await updateLastSync(user.email)
-    const stats = await store.getStats()
 
     return NextResponse.json({
       total: rawEmails.length,
-      classified,
-      bookings: stats.bookings,
-      actionRequired: stats.actionRequired,
+      stored,
       errors,
       timestamp: new Date().toISOString(),
     })
@@ -88,11 +72,5 @@ export async function GET() {
   }
 
   const [total, stats] = await Promise.all([store.size(), store.getStats()])
-
-  return NextResponse.json({
-    lastSync: store.getLastSync(),
-    total,
-    syncing: store.isSyncing(),
-    stats,
-  })
+  return NextResponse.json({ lastSync: store.getLastSync(), total, syncing: store.isSyncing(), stats })
 }
