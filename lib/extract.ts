@@ -923,7 +923,7 @@ async function processQueue(
 
 /**
  * Batch runner: processes unextracted emails in two passes.
- * Pass 1 — up to 3 text-only emails (no attachments), 2 s apart.
+ * Pass 1 — up to 4 text-only emails (no attachments), 2 s apart.
  * Pass 2 — up to 1 attachment email, processed alone (heavier Sonnet call).
  */
 export async function runExtraction(): Promise<ExtractionResult> {
@@ -933,7 +933,7 @@ export async function runExtraction(): Promise<ExtractionResult> {
     .eq('booking_extracted', false)
 
   const [{ data: textEmails, error: e1 }, { data: attEmails, error: e2 }] = await Promise.all([
-    base.eq('has_confirmation_attachment', false).limit(3),
+    base.eq('has_confirmation_attachment', false).limit(4),
     base.eq('has_confirmation_attachment', true).limit(1),
   ])
 

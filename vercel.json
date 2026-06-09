@@ -37,7 +37,7 @@
     },
     {
       "path": "/api/cron/extract",
-      "schedule": "0 * * * *"
+      "schedule": "*/5 * * * *"
     }
   ]
 }
