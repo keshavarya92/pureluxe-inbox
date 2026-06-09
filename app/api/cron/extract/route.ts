@@ -18,15 +18,15 @@ async function handler(req: NextRequest) {
 
     const result = await runExtraction()
 
-    // If there is still a backlog, chain the next run immediately rather than
-    // waiting for the next scheduled tick — 1 s delay, fire and forget
+    // If there is still a backlog, chain the next run after a 10 s pause
+    // (prevents parallel runs stacking up) — fire and forget
     if ((backlog ?? 0) > 0) {
       setTimeout(() => {
         fetch('https://pureluxe-inbox.vercel.app/api/cron/extract', {
           method: 'GET',
           headers: { Authorization: 'Bearer ' + process.env.CRON_SECRET },
         }).catch(() => {})
-      }, 1000)
+      }, 10000)
     }
 
     return NextResponse.json({ ...result, backlog: backlog ?? 0 })

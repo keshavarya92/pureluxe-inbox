@@ -245,12 +245,26 @@ async function extractFromEmail(
     text: 'Extract all structured data from the above email and attachments. Return ONLY valid JSON as specified.',
   })
 
-  const response = await anthropic.messages.create({
+  const callSonnet = () => anthropic.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 4096,
     system: getSystemPrompt(),
     messages: [{ role: 'user', content: blocks }],
   })
+
+  let response: Awaited<ReturnType<typeof callSonnet>>
+  try {
+    response = await callSonnet()
+  } catch (err: any) {
+    if (err?.status === 429) {
+      const retryAfter = parseInt(err?.headers?.['retry-after'] ?? '60', 10)
+      console.warn(`Sonnet 429 — waiting ${retryAfter}s before retry`)
+      await new Promise(r => setTimeout(r, retryAfter * 1000))
+      response = await callSonnet()
+    } else {
+      throw err
+    }
+  }
 
   const raw = response.content
     .filter(b => b.type === 'text')
@@ -902,9 +916,10 @@ export async function runExtraction(): Promise<ExtractionResult> {
   let errors        = 0
 
   for (let i = 0; i < (emails ?? []).length; i++) {
-    if (i > 0) await new Promise(r => setTimeout(r, 2000))
+    if (i > 0) await new Promise(r => setTimeout(r, 5000))
 
     const email = emails![i]
+    let skipMark = false
     try {
       const { data: user } = await supabase
         .from('inbox_users')
@@ -926,8 +941,12 @@ export async function runExtraction(): Promise<ExtractionResult> {
     } catch (err: any) {
       console.error('processEmail failed for', email.id, err)
       errors++
+      if (err?.status === 429) {
+        console.warn(`Persistent 429 for ${email.id} — leaving unextracted for next run`)
+        skipMark = true
+      }
     } finally {
-      await markExtracted(email.id)
+      if (!skipMark) await markExtracted(email.id)
     }
   }
 
