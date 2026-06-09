@@ -311,13 +311,17 @@ async function writeExtracted(
 
           // Auto-create pending commission if commission data present and none explicitly extracted
           if (data?.id && !parsed.commissions?.length && (b.commission_rate || b.commission_expected)) {
-            await supabase.from('commissions').insert({
-              booking_id:      data.id,
-              amount_expected: b.commission_expected ?? null,
-              currency:        b.currency            ?? null,
-              channel:         b.commission_channel  ?? null,
-              status:          'pending',
-            }).catch(err => console.error('Auto-commission insert failed:', err))
+            try {
+              await supabase.from('commissions').insert({
+                booking_id:      data.id,
+                amount_expected: b.commission_expected ?? null,
+                currency:        b.currency            ?? null,
+                channel:         b.commission_channel  ?? null,
+                status:          'pending',
+              })
+            } catch (err) {
+              console.error('Auto-commission insert failed:', err)
+            }
           }
         }
       } catch (err) {
