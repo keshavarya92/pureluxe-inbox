@@ -87,3 +87,19 @@ create or replace trigger inbox_users_updated_at
   for each row execute function set_updated_at();
 
 create index if not exists inbox_users_active_idx on inbox_users (active) where active = true;
+
+-- ----------------------------------------------------------------
+-- AI extraction agent: misc overflow column + new bookings columns
+-- ----------------------------------------------------------------
+
+-- misc text column on tables that receive Claude's unstructured overflow
+alter table bookings    add column if not exists misc       text;
+alter table commissions add column if not exists misc       text;
+alter table enquiries   add column if not exists misc       text;
+alter table clients     add column if not exists misc       text;
+
+-- new bookings columns referenced by the extraction agent schema
+alter table bookings    add column if not exists country    text;
+alter table bookings    add column if not exists chain      text;
+alter table bookings    add column if not exists onyx_ref   text;
+alter table bookings    add column if not exists group_name text;
