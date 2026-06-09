@@ -90,12 +90,14 @@ async function uploadIdentityDoc(emailId: string, att: Attachment): Promise<void
     return
   }
   // Insert record if client_documents table exists
-  await supabase.from('client_documents').insert({
-    email_id:     emailId,
-    filename:     att.filename,
-    mime_type:    att.mimeType,
-    storage_path: path,
-  }).catch(() => {})
+  try {
+    await supabase.from('client_documents').insert({
+      email_id:     emailId,
+      filename:     att.filename,
+      mime_type:    att.mimeType,
+      storage_path: path,
+    })
+  } catch { /* table may not exist yet */ }
 }
 
 // ----------------------------------------------------------------
@@ -594,12 +596,14 @@ async function writeExtracted(
   }
 
   // ---- email_threads: link this email to every extracted record ----
-  await supabase.from('email_threads').insert({
-    email_id:    emailId,
-    booking_id:  bookingId,
-    client_id:   primaryClientId,
-    property_id: primaryPropId,
-  }).catch(() => {}) // table may not exist yet
+  try {
+    await supabase.from('email_threads').insert({
+      email_id:    emailId,
+      booking_id:  bookingId,
+      client_id:   primaryClientId,
+      property_id: primaryPropId,
+    })
+  } catch { /* table may not exist yet */ }
 
   if (parsed.misc) {
     console.log(`[misc] ${emailId}:`, parsed.misc)
