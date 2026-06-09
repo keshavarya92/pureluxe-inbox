@@ -884,27 +884,16 @@ export async function processEmail(
   return writeExtracted(parsed, email.id, email.inbox_address)
 }
 
-/**
- * Batch runner: processes up to 10 unextracted emails with a 2-second delay
- * between calls to avoid Anthropic rate limits.
- */
-export async function runExtraction(): Promise<ExtractionResult> {
-  const { data: emails, error: fetchError } = await supabase
-    .from('inbox_emails')
-    .select('id, subject, from_email, to_addresses, email_date, snippet, body, inbox_address')
-    .eq('booking_extracted', false)
-    .limit(10)
+const SELECT_FIELDS = 'id, subject, from_email, to_addresses, email_date, snippet, body, inbox_address'
 
-  if (fetchError) throw new Error(fetchError.message)
-
-  let processed     = 0
-  let tablesWritten = 0
-  let errors        = 0
-
-  for (let i = 0; i < (emails ?? []).length; i++) {
+async function processQueue(
+  emails: any[],
+  processed: { count: number; tablesWritten: number; errors: number },
+): Promise<void> {
+  for (let i = 0; i < emails.length; i++) {
     if (i > 0) await new Promise(r => setTimeout(r, 2000))
 
-    const email = emails![i]
+    const email = emails[i]
     try {
       const { data: user } = await supabase
         .from('inbox_users')
@@ -921,15 +910,45 @@ export async function runExtraction(): Promise<ExtractionResult> {
       }
 
       const written = await processEmail(email, gmail)
-      tablesWritten += written
-      processed++
+      processed.tablesWritten += written
+      processed.count++
     } catch (err: any) {
       console.error('processEmail failed for', email.id, err)
-      errors++
+      processed.errors++
     } finally {
       await markExtracted(email.id)
     }
   }
+}
 
-  return { processed, tables_written: tablesWritten, errors, timestamp: new Date().toISOString() }
+/**
+ * Batch runner: processes unextracted emails in two passes.
+ * Pass 1 — up to 3 text-only emails (no attachments), 2 s apart.
+ * Pass 2 — up to 1 attachment email, processed alone (heavier Sonnet call).
+ */
+export async function runExtraction(): Promise<ExtractionResult> {
+  const base = supabase
+    .from('inbox_emails')
+    .select(SELECT_FIELDS)
+    .eq('booking_extracted', false)
+
+  const [{ data: textEmails, error: e1 }, { data: attEmails, error: e2 }] = await Promise.all([
+    base.eq('has_confirmation_attachment', false).limit(3),
+    base.eq('has_confirmation_attachment', true).limit(1),
+  ])
+
+  if (e1) throw new Error(e1.message)
+  if (e2) throw new Error(e2.message)
+
+  const stats = { count: 0, tablesWritten: 0, errors: 0 }
+
+  await processQueue(textEmails ?? [], stats)
+  await processQueue(attEmails  ?? [], stats)
+
+  return {
+    processed:      stats.count,
+    tables_written: stats.tablesWritten,
+    errors:         stats.errors,
+    timestamp:      new Date().toISOString(),
+  }
 }

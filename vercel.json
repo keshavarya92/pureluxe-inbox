@@ -17,6 +17,9 @@
     "app/api/cron/extract/route.ts": {
       "maxDuration": 300
     },
+    "app/api/admin/extract/route.ts": {
+      "maxDuration": 300
+    },
     "app/api/emails/route.ts": {
       "maxDuration": 30
     },
