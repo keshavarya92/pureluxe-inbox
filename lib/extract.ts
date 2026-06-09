@@ -13,7 +13,7 @@ if (!process.env.ANTHROPIC_API_KEY) {
   throw new Error('Missing ANTHROPIC_API_KEY environment variable')
 }
 
-const anthropic = new Anthropic({
+const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
   defaultHeaders: { 'anthropic-beta': 'prompt-caching-2024-07-31' },
 })
@@ -248,18 +248,18 @@ async function extractFromEmail(
     text: 'Extract all structured data from the above email and attachments. Return ONLY valid JSON as specified.',
   })
 
-  const callSonnet = () => anthropic.messages.create({
+  const callSonnet = () => client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 4096,
     system: [
       {
         type: 'text',
         text: getSystemPrompt(),
-        cache_control: { type: 'ephemeral' },
+        cache_control: { type: 'ephemeral', ttl: '1h' },
       },
-    ],
+    ] as any,
     messages: [{ role: 'user', content: blocks }],
-  } as any)
+  })
 
   let response: Awaited<ReturnType<typeof callSonnet>>
   try {
@@ -274,6 +274,14 @@ async function extractFromEmail(
       throw err
     }
   }
+
+  const usage = response.usage as any
+  console.log('[cache]', JSON.stringify({
+    input:         usage.input_tokens,
+    output:        usage.output_tokens,
+    cache_created: usage.cache_creation_input_tokens ?? 0,
+    cache_read:    usage.cache_read_input_tokens     ?? 0,
+  }))
 
   const raw = response.content
     .filter(b => b.type === 'text')
