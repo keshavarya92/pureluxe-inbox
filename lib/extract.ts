@@ -867,6 +867,7 @@ async function writeExtracted(
 const NOISE_SENDER_FRAGMENTS = [
   'noreply', 'no-reply', 'donotreply', 'newsletter', 'marketing',
   'notifications', 'updates@', 'alerts@',
+  '@pinterest.com', '@squareup.com', '@survey.', '@feedback.', 'feedback@',
 ]
 
 const NOISE_DOMAINS = [
@@ -877,6 +878,10 @@ const NOISE_DOMAINS = [
 const NOISE_SUBJECT_PHRASES = [
   'unsubscribe', 'newsletter', 'vote for', 'last chance to vote',
   'promotional', 'special offer', 'fixed departures', 'b2b packages',
+  'boarding pass', 'check-in confirmation', 'your flight', 'flight reminder',
+  'trip reminder', 'payment completed', 'invoice paid', 'readers choice',
+  'new route', 'unwrap the magic', 'last-minute summer', 'summer offers',
+  'trade circular', 'fam trip invitation',
 ]
 
 function isStage1Noise(fromEmail: string, subject: string): boolean {
@@ -900,9 +905,10 @@ async function isStage2Noise(subject: string, snippet: string): Promise<boolean>
     messages: [{
       role: 'user',
       content:
-        `Is this email clearly a newsletter, marketing promotion, trade circular, ` +
-        `automated notification, or social media digest with no actionable travel ` +
-        `business content? Reply with only YES or NO. When in doubt, reply NO.\n\n` +
+        `Is this email a newsletter, marketing promotion, automated airline notification, ` +
+        `trade circular, payment receipt for a non-hotel service, social media digest, ` +
+        `or industry award vote request? These should be skipped. ` +
+        `Reply YES to skip, NO to process. When in doubt about newsletters and promotions, reply YES.\n\n` +
         `Subject: ${subject}\nSnippet: ${snippet}`,
     }],
   })
