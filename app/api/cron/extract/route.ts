@@ -18,13 +18,15 @@ async function handler(req: NextRequest) {
 
     const result = await runExtraction()
 
-    // If the backlog is large, fire a self-call immediately rather than waiting
-    // for the next scheduled tick — fire and forget, do not await
-    if ((backlog ?? 0) > 5) {
-      const selfUrl = new URL('/api/cron/extract', req.url).toString()
-      fetch(selfUrl, {
-        headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
-      }).catch(() => {})
+    // If there is still a backlog, chain the next run immediately rather than
+    // waiting for the next scheduled tick — 1 s delay, fire and forget
+    if ((backlog ?? 0) > 0) {
+      setTimeout(() => {
+        fetch('https://pureluxe-inbox.vercel.app/api/cron/extract', {
+          method: 'GET',
+          headers: { Authorization: 'Bearer ' + process.env.CRON_SECRET },
+        }).catch(() => {})
+      }, 1000)
     }
 
     return NextResponse.json({ ...result, backlog: backlog ?? 0 })
