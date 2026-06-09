@@ -2,6 +2,8 @@
 // A single Sonnet call per email extracts all structured data across all tables.
 // Rules-based logic, JSONB mapping, category filtering, and phrase detection are gone.
 
+import fs from 'fs'
+import path from 'path'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from './supabase'
 import { getGmailClient } from './gmail'
@@ -101,41 +103,69 @@ async function uploadIdentityDoc(emailId: string, att: Attachment): Promise<void
 }
 
 // ----------------------------------------------------------------
-// Extraction system prompt
+// Schema description (read once, cached for the process lifetime)
 // ----------------------------------------------------------------
 
-const EXTRACTION_SYSTEM = `You are a data extraction agent for PureLuxe International, a luxury travel agency (KFT Corporation, Mumbai). You have access to our complete database schema. Read this email carefully including any attachment content provided. Extract ALL structured data and map it to our database tables. Use your judgment — you understand what each table is for.
+let _schemaCache: string | null = null
 
-Our database tables and their key columns:
-- bookings: client_name, hotel_name, city, country, chain, check_in (YYYY-MM-DD), check_out (YYYY-MM-DD), num_rooms, num_adults, total_cost, currency, commission_rate, commission_expected, commission_channel, hotel_ref, amadeus_ref, lhw_ref, onyx_ref, status (confirmed/option/enquiry/cancelled), cancellation_deadline (YYYY-MM-DD), cancellation_policy, special_occasion, vip_flag, booked_by_name, booking_source, group_name, notes, misc
-- commissions: amount_expected, currency, channel (TACS/ONYX/BANK_TRANSFER/SLH/DIRECT), status (pending/received/disputed), date_received (YYYY-MM-DD), bank_ref, notes, misc
-- clients: full_name, title, first_name, last_name, email, phone, nationality, loyalty_programs (array of {chain, number, tier}), birthday, anniversary, general_notes, misc
-- client_preferences: client_name (for lookup), category (room/dining/beverage/amenity/service/health), preference, preference_type (like/dislike/allergy/requirement), notes
-- client_health_notes: client_name (for lookup), condition, details, dietary_restrictions (array), mobility_notes
-- property_contacts: name, title, email, phone, property (name for lookup), department
-- properties: name, chain, city, country, property_type, reservations_email, default_commission, commission_channel
-- pre_stay_tasks: task_type (arrival_time_request/dietary_brief/wellness_questionnaire/room_preference_request/transfer_coordination/vip_brief/upgrade_request), description, due_date (YYYY-MM-DD)
-- air_bookings: passenger_name, airline, flight_number, origin (IATA), destination (IATA), departure_datetime, cabin_class, pnr, ticket_number, fare_inr, total_inr, consolidator, client_type (leisure/corporate), corporate_account
-- airport_vip_services: airport (IATA), airport_name, service_type (meet_assist/vip_lounge/fast_track), service_date (YYYY-MM-DD), flight_number, pax_names (array), provider, status, cost, currency
-- enquiries: client_name, property_name, destination, check_in, check_out, num_rooms, num_adults, quoted_rate, quoted_currency, notes, misc
-- visa_tracking: client_name (for lookup), destination_country, nationality, visa_required, visa_type, visa_status, application_date, expected_date, notes
+function getSchemaDescription(): string {
+  if (_schemaCache) return _schemaCache
+  try {
+    _schemaCache = fs.readFileSync(
+      path.join(process.cwd(), 'supabase', 'schema.sql'),
+      'utf-8',
+    )
+  } catch {
+    _schemaCache = '(schema file not found)'
+  }
+  return _schemaCache
+}
 
-Return ONLY valid JSON with this structure. Use null for any table where no relevant data exists. Never invent data — only extract what is explicitly present in the email.
+// ----------------------------------------------------------------
+// Extraction system prompt (built once, cached)
+// ----------------------------------------------------------------
+
+let _systemPromptCache: string | null = null
+
+function getSystemPrompt(): string {
+  if (_systemPromptCache) return _systemPromptCache
+
+  _systemPromptCache = `You are the AI operations backbone for PureLuxe International (KFT Corporation, Mumbai) — a luxury travel agency managing high-value hotel bookings, client relationships, air travel, and supplier networks across the globe.
+
+Your job: read every incoming email and extract ALL structured data, mapping it precisely to our Supabase tables. You have full access to our live database schema below. Use it to understand each table's columns, data types, and relationships before extracting.
+
+DATABASE SCHEMA:
+${getSchemaDescription()}
+
+EXTRACTION RULES:
+1. Read the email body and every attachment carefully. Extract everything relevant.
+2. For each extracted record, set the correct "action":
+   - "create" (default) — a new record that doesn't yet exist in our system
+   - "update" — an existing record is being changed (room type, dates, rate revision, name correction, etc.)
+   - "cancel" — an existing booking, flight, or service is being cancelled
+3. For "update" and "cancel" actions, add a "match_on" object with the minimal fields needed to uniquely identify the existing record, e.g. {"hotel_ref": "HRC-20481"} or {"pnr": "XYZABC"} or {"amadeus_ref": "7ABCDE"}. For "create" actions, "match_on" may be omitted or left as {}.
+4. Extract only what is explicitly stated in the email. Never invent, guess, or infer beyond what is written.
+5. Use YYYY-MM-DD for all dates. Use null for any field not present.
+
+Return ONLY valid JSON with this exact structure. Use null for tables where the email contains no relevant data:
 {
-  "bookings": [ {...} ] or null,
-  "commissions": [ {...} ] or null,
-  "clients": [ {...} ] or null,
-  "client_preferences": [ {...} ] or null,
-  "client_health_notes": [ {...} ] or null,
-  "property_contacts": [ {...} ] or null,
-  "properties": [ {...} ] or null,
-  "pre_stay_tasks": [ {...} ] or null,
-  "air_bookings": [ {...} ] or null,
-  "airport_vip_services": [ {...} ] or null,
-  "enquiries": [ {...} ] or null,
-  "visa_tracking": [ {...} ] or null,
-  "misc": "any relevant data that does not fit the above tables as free text"
+  "bookings":             [{ "action": "create|update|cancel", "match_on": {}, ...fields }] or null,
+  "commissions":          [{ "action": "create|update|cancel", "match_on": {}, ...fields }] or null,
+  "clients":              [{ "action": "create|update",        "match_on": {}, ...fields }] or null,
+  "client_preferences":   [{ "action": "create|update",        "match_on": {}, ...fields }] or null,
+  "client_health_notes":  [{ "action": "create|update",        "match_on": {}, ...fields }] or null,
+  "property_contacts":    [{ "action": "create|update",        "match_on": {}, ...fields }] or null,
+  "properties":           [{ "action": "create|update",        "match_on": {}, ...fields }] or null,
+  "pre_stay_tasks":       [{ "action": "create|update|cancel", "match_on": {}, ...fields }] or null,
+  "air_bookings":         [{ "action": "create|update|cancel", "match_on": {}, ...fields }] or null,
+  "airport_vip_services": [{ "action": "create|update|cancel", "match_on": {}, ...fields }] or null,
+  "enquiries":            [{ "action": "create|update",        "match_on": {}, ...fields }] or null,
+  "visa_tracking":        [{ "action": "create|update",        "match_on": {}, ...fields }] or null,
+  "misc": "free-text dump for anything that doesn't map to the tables above"
 }`
+
+  return _systemPromptCache
+}
 
 // ----------------------------------------------------------------
 // Step 1 + 2: gather all content and run a single Sonnet call
@@ -218,7 +248,7 @@ async function extractFromEmail(
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 4096,
-    system: EXTRACTION_SYSTEM,
+    system: getSystemPrompt(),
     messages: [{ role: 'user', content: blocks }],
   })
 
@@ -234,6 +264,11 @@ async function extractFromEmail(
 // Step 3: write all extracted data to Supabase
 // ----------------------------------------------------------------
 
+function stripMeta(obj: Record<string, any>): Record<string, any> {
+  const { action: _a, match_on: _m, ...rest } = obj
+  return rest
+}
+
 async function writeExtracted(
   parsed: Record<string, any>,
   emailId: string,
@@ -247,18 +282,43 @@ async function writeExtracted(
   // ---- bookings ----
   if (parsed.bookings?.length) {
     for (const b of parsed.bookings) {
+      const action  = (b.action ?? 'create') as string
+      const matchOn: Record<string, any> = b.match_on ?? {}
+      const fields  = stripMeta(b)
+
       try {
+        if (action === 'cancel') {
+          if (Object.keys(matchOn).length) {
+            await supabase.from('bookings').update({ status: 'cancelled' }).match(matchOn)
+          }
+          continue
+        }
+
+        if (action === 'update') {
+          if (!Object.keys(matchOn).length) continue
+          const [clientId, propertyId] = await Promise.all([
+            fields.client_name ? resolveClient(fields.client_name).catch(() => null) : Promise.resolve(null),
+            fields.hotel_name  ? resolveProperty(fields.hotel_name, fields.city ?? null, fields.country ?? null, fields.chain ?? null).catch(() => null) : Promise.resolve(null),
+          ])
+          const updatePayload: Record<string, unknown> = { ...fields }
+          if (clientId   !== null) updatePayload.client_id   = clientId
+          if (propertyId !== null) updatePayload.property_id = propertyId
+          await supabase.from('bookings').update(updatePayload).match(matchOn)
+          continue
+        }
+
+        // action === 'create'
         const [clientId, propertyId, bookedBy] = await Promise.all([
-          b.client_name ? resolveClient(b.client_name).catch(() => null) : Promise.resolve(null),
-          b.hotel_name  ? resolveProperty(b.hotel_name, b.city ?? null, b.country ?? null, b.chain ?? null).catch(() => null) : Promise.resolve(null),
+          fields.client_name ? resolveClient(fields.client_name).catch(() => null) : Promise.resolve(null),
+          fields.hotel_name  ? resolveProperty(fields.hotel_name, fields.city ?? null, fields.country ?? null, fields.chain ?? null).catch(() => null) : Promise.resolve(null),
           resolveBookedBy(inboxAddress),
         ])
         if (!primaryClientId) primaryClientId = clientId
         if (!primaryPropId)   primaryPropId   = propertyId
 
         const orParts: string[] = []
-        if (b.hotel_ref)   orParts.push(`hotel_ref.eq.${b.hotel_ref}`)
-        if (b.amadeus_ref) orParts.push(`amadeus_ref.eq.${b.amadeus_ref}`)
+        if (fields.hotel_ref)   orParts.push(`hotel_ref.eq.${fields.hotel_ref}`)
+        if (fields.amadeus_ref) orParts.push(`amadeus_ref.eq.${fields.amadeus_ref}`)
 
         let existingId: string | null = null
         if (orParts.length > 0) {
@@ -269,36 +329,36 @@ async function writeExtracted(
         const payload = {
           email_id:              emailId,
           client_id:             clientId,
-          client_name:           b.client_name           ?? null,
+          client_name:           fields.client_name           ?? null,
           property_id:           propertyId,
-          hotel_name:            b.hotel_name            ?? null,
-          city:                  b.city                  ?? null,
-          country:               b.country               ?? null,
-          chain:                 b.chain                 ?? null,
+          hotel_name:            fields.hotel_name            ?? null,
+          city:                  fields.city                  ?? null,
+          country:               fields.country               ?? null,
+          chain:                 fields.chain                 ?? null,
           booked_by:             bookedBy,
-          booked_by_name:        inboxAddress            || null,
-          check_in:              b.check_in              ?? null,
-          check_out:             b.check_out             ?? null,
-          num_rooms:             b.num_rooms             ?? null,
-          num_adults:            b.num_adults            ?? null,
-          total_cost:            b.total_cost            ?? null,
-          currency:              b.currency              ?? null,
-          commission_rate:       b.commission_rate       ?? null,
-          commission_expected:   b.commission_expected   ?? null,
-          commission_channel:    b.commission_channel    ?? null,
-          hotel_ref:             b.hotel_ref             ?? null,
-          amadeus_ref:           b.amadeus_ref           ?? null,
-          lhw_ref:               b.lhw_ref               ?? null,
-          onyx_ref:              b.onyx_ref              ?? null,
-          booking_source:        b.booking_source        ?? null,
-          status:                b.status                ?? null,
-          cancellation_deadline: b.cancellation_deadline ?? null,
-          cancellation_policy:   b.cancellation_policy   ?? null,
-          special_occasion:      b.special_occasion      ?? null,
-          vip_flag:              b.vip_flag              ?? false,
-          group_name:            b.group_name            ?? null,
-          notes:                 b.notes                 ?? null,
-          misc:                  b.misc                  ?? null,
+          booked_by_name:        inboxAddress                 || null,
+          check_in:              fields.check_in              ?? null,
+          check_out:             fields.check_out             ?? null,
+          num_rooms:             fields.num_rooms             ?? null,
+          num_adults:            fields.num_adults            ?? null,
+          total_cost:            fields.total_cost            ?? null,
+          currency:              fields.currency              ?? null,
+          commission_rate:       fields.commission_rate       ?? null,
+          commission_expected:   fields.commission_expected   ?? null,
+          commission_channel:    fields.commission_channel    ?? null,
+          hotel_ref:             fields.hotel_ref             ?? null,
+          amadeus_ref:           fields.amadeus_ref           ?? null,
+          lhw_ref:               fields.lhw_ref               ?? null,
+          onyx_ref:              fields.onyx_ref              ?? null,
+          booking_source:        fields.booking_source        ?? null,
+          status:                fields.status                ?? null,
+          cancellation_deadline: fields.cancellation_deadline ?? null,
+          cancellation_policy:   fields.cancellation_policy   ?? null,
+          special_occasion:      fields.special_occasion      ?? null,
+          vip_flag:              fields.vip_flag              ?? false,
+          group_name:            fields.group_name            ?? null,
+          notes:                 fields.notes                 ?? null,
+          misc:                  fields.misc                  ?? null,
         }
 
         if (existingId) {
@@ -309,14 +369,13 @@ async function writeExtracted(
           if (error) throw new Error(`bookings insert: ${error.message}`)
           if (!bookingId) bookingId = data?.id ?? null
 
-          // Auto-create pending commission if commission data present and none explicitly extracted
-          if (data?.id && !parsed.commissions?.length && (b.commission_rate || b.commission_expected)) {
+          if (data?.id && !parsed.commissions?.length && (fields.commission_rate || fields.commission_expected)) {
             try {
               await supabase.from('commissions').insert({
                 booking_id:      data.id,
-                amount_expected: b.commission_expected ?? null,
-                currency:        b.currency            ?? null,
-                channel:         b.commission_channel  ?? null,
+                amount_expected: fields.commission_expected ?? null,
+                currency:        fields.currency            ?? null,
+                channel:         fields.commission_channel  ?? null,
                 status:          'pending',
               })
             } catch (err) {
@@ -334,17 +393,35 @@ async function writeExtracted(
   // ---- commissions ----
   if (parsed.commissions?.length) {
     for (const c of parsed.commissions) {
+      const action  = (c.action ?? 'create') as string
+      const matchOn: Record<string, any> = c.match_on ?? {}
+      const fields  = stripMeta(c)
+
       try {
+        if (action === 'cancel') {
+          if (Object.keys(matchOn).length) {
+            await supabase.from('commissions').update({ status: 'disputed' }).match(matchOn)
+          }
+          continue
+        }
+
+        if (action === 'update') {
+          if (Object.keys(matchOn).length) {
+            await supabase.from('commissions').update(fields).match(matchOn)
+          }
+          continue
+        }
+
         await supabase.from('commissions').insert({
           booking_id:      bookingId,
-          amount_expected: c.amount_expected ?? null,
-          currency:        c.currency        ?? null,
-          channel:         c.channel         ?? null,
-          status:          c.status          ?? 'pending',
-          date_received:   c.date_received   ?? null,
-          bank_ref:        c.bank_ref         ?? null,
-          notes:           c.notes           ?? null,
-          misc:            c.misc            ?? null,
+          amount_expected: fields.amount_expected ?? null,
+          currency:        fields.currency        ?? null,
+          channel:         fields.channel         ?? null,
+          status:          fields.status          ?? 'pending',
+          date_received:   fields.date_received   ?? null,
+          bank_ref:        fields.bank_ref         ?? null,
+          notes:           fields.notes           ?? null,
+          misc:            fields.misc            ?? null,
         })
       } catch (err) {
         console.error('Commission write failed:', err)
@@ -356,16 +433,29 @@ async function writeExtracted(
   // ---- clients ----
   if (parsed.clients?.length) {
     for (const c of parsed.clients) {
-      if (!c.full_name) continue
+      const action  = (c.action ?? 'create') as string
+      const matchOn: Record<string, any> = c.match_on ?? {}
+      const fields  = stripMeta(c)
+
+      if (!fields.full_name && action === 'create') continue
+
       try {
+        if (action === 'update') {
+          if (Object.keys(matchOn).length) {
+            await supabase.from('clients').update(fields).match(matchOn)
+          }
+          continue
+        }
+
+        // create — deduplicate by full_name
         const { data: existing } = await supabase
-          .from('clients').select('id').ilike('full_name', c.full_name).maybeSingle()
+          .from('clients').select('id').ilike('full_name', fields.full_name).maybeSingle()
         if (existing) {
-          await supabase.from('clients').update({ ...c, misc: c.misc ?? null }).eq('id', existing.id)
+          await supabase.from('clients').update({ ...fields, misc: fields.misc ?? null }).eq('id', existing.id)
           if (!primaryClientId) primaryClientId = existing.id
         } else {
           const { data } = await supabase.from('clients')
-            .insert({ ...c, misc: c.misc ?? null }).select('id').single()
+            .insert({ ...fields, misc: fields.misc ?? null }).select('id').single()
           if (!primaryClientId) primaryClientId = data?.id ?? null
         }
       } catch (err) {
@@ -378,16 +468,27 @@ async function writeExtracted(
   // ---- client_preferences ----
   if (parsed.client_preferences?.length) {
     for (const p of parsed.client_preferences) {
-      if (!p.client_name) continue
+      const action  = (p.action ?? 'create') as string
+      const matchOn: Record<string, any> = p.match_on ?? {}
+      const fields  = stripMeta(p)
+
+      if (!fields.client_name) continue
       try {
-        const clientId = await resolveClient(p.client_name).catch(() => null)
+        if (action === 'update') {
+          if (Object.keys(matchOn).length) {
+            await supabase.from('client_preferences').update(fields).match(matchOn)
+          }
+          continue
+        }
+
+        const clientId = await resolveClient(fields.client_name).catch(() => null)
         if (!clientId) continue
         await supabase.from('client_preferences').insert({
           client_id:       clientId,
-          category:        p.category        ?? null,
-          preference:      p.preference      ?? null,
-          preference_type: p.preference_type ?? null,
-          notes:           p.notes           ?? null,
+          category:        fields.category        ?? null,
+          preference:      fields.preference      ?? null,
+          preference_type: fields.preference_type ?? null,
+          notes:           fields.notes           ?? null,
         })
       } catch (err) {
         console.error('Client preference write failed:', err)
@@ -399,16 +500,27 @@ async function writeExtracted(
   // ---- client_health_notes ----
   if (parsed.client_health_notes?.length) {
     for (const h of parsed.client_health_notes) {
-      if (!h.client_name) continue
+      const action  = (h.action ?? 'create') as string
+      const matchOn: Record<string, any> = h.match_on ?? {}
+      const fields  = stripMeta(h)
+
+      if (!fields.client_name) continue
       try {
-        const clientId = await resolveClient(h.client_name).catch(() => null)
+        if (action === 'update') {
+          if (Object.keys(matchOn).length) {
+            await supabase.from('client_health_notes').update(fields).match(matchOn)
+          }
+          continue
+        }
+
+        const clientId = await resolveClient(fields.client_name).catch(() => null)
         if (!clientId) continue
         await supabase.from('client_health_notes').insert({
           client_id:            clientId,
-          condition:            h.condition            ?? null,
-          details:              h.details              ?? null,
-          dietary_restrictions: h.dietary_restrictions ?? [],
-          mobility_notes:       h.mobility_notes       ?? null,
+          condition:            fields.condition            ?? null,
+          details:              fields.details              ?? null,
+          dietary_restrictions: fields.dietary_restrictions ?? [],
+          mobility_notes:       fields.mobility_notes       ?? null,
         })
       } catch (err) {
         console.error('Health notes write failed:', err)
@@ -420,20 +532,31 @@ async function writeExtracted(
   // ---- property_contacts ----
   if (parsed.property_contacts?.length) {
     for (const pc of parsed.property_contacts) {
+      const action  = (pc.action ?? 'create') as string
+      const matchOn: Record<string, any> = pc.match_on ?? {}
+      const fields  = stripMeta(pc)
+
       try {
-        const propertyId = pc.property
-          ? await resolveProperty(pc.property, null, null, null).catch(() => null)
+        if (action === 'update') {
+          if (Object.keys(matchOn).length) {
+            await supabase.from('property_contacts').update(fields).match(matchOn)
+          }
+          continue
+        }
+
+        const propertyId = fields.property
+          ? await resolveProperty(fields.property, null, null, null).catch(() => null)
           : null
         const payload = {
           property_id: propertyId,
-          property:    pc.property   ?? null,
-          name:        pc.name       ?? null,
-          title:       pc.title      ?? null,
-          email:       pc.email      ?? null,
-          phone:       pc.phone      ?? null,
-          department:  pc.department ?? null,
+          property:    fields.property   ?? null,
+          name:        fields.name       ?? null,
+          title:       fields.title      ?? null,
+          email:       fields.email      ?? null,
+          phone:       fields.phone      ?? null,
+          department:  fields.department ?? null,
         }
-        if (pc.email) {
+        if (fields.email) {
           await supabase.from('property_contacts').upsert(payload, { onConflict: 'email' })
         } else {
           await supabase.from('property_contacts').insert(payload)
@@ -448,14 +571,25 @@ async function writeExtracted(
   // ---- properties ----
   if (parsed.properties?.length) {
     for (const p of parsed.properties) {
-      if (!p.name) continue
+      const action  = (p.action ?? 'create') as string
+      const matchOn: Record<string, any> = p.match_on ?? {}
+      const fields  = stripMeta(p)
+
+      if (!fields.name && action === 'create') continue
       try {
+        if (action === 'update') {
+          if (Object.keys(matchOn).length) {
+            await supabase.from('properties').update(fields).match(matchOn)
+          }
+          continue
+        }
+
         const { data: existing } = await supabase
-          .from('properties').select('id').ilike('name', p.name).maybeSingle()
+          .from('properties').select('id').ilike('name', fields.name).maybeSingle()
         if (existing) {
-          await supabase.from('properties').update(p).eq('id', existing.id)
+          await supabase.from('properties').update(fields).eq('id', existing.id)
         } else {
-          await supabase.from('properties').insert(p)
+          await supabase.from('properties').insert(fields)
         }
       } catch (err) {
         console.error('Property write failed:', err)
@@ -467,12 +601,30 @@ async function writeExtracted(
   // ---- pre_stay_tasks ----
   if (parsed.pre_stay_tasks?.length) {
     for (const t of parsed.pre_stay_tasks) {
+      const action  = (t.action ?? 'create') as string
+      const matchOn: Record<string, any> = t.match_on ?? {}
+      const fields  = stripMeta(t)
+
       try {
+        if (action === 'cancel') {
+          if (Object.keys(matchOn).length) {
+            await supabase.from('pre_stay_tasks').update({ status: 'cancelled' }).match(matchOn)
+          }
+          continue
+        }
+
+        if (action === 'update') {
+          if (Object.keys(matchOn).length) {
+            await supabase.from('pre_stay_tasks').update(fields).match(matchOn)
+          }
+          continue
+        }
+
         await supabase.from('pre_stay_tasks').insert({
           booking_id:  bookingId,
-          task_type:   t.task_type   ?? null,
-          description: t.description ?? null,
-          due_date:    t.due_date     ?? null,
+          task_type:   fields.task_type   ?? null,
+          description: fields.description ?? null,
+          due_date:    fields.due_date     ?? null,
         })
       } catch (err) {
         console.error('Pre-stay task write failed:', err)
@@ -484,10 +636,29 @@ async function writeExtracted(
   // ---- air_bookings ----
   if (parsed.air_bookings?.length) {
     for (const a of parsed.air_bookings) {
+      const action  = (a.action ?? 'create') as string
+      const matchOn: Record<string, any> = a.match_on ?? {}
+      const fields  = stripMeta(a)
+
       try {
+        if (action === 'cancel') {
+          if (Object.keys(matchOn).length) {
+            await supabase.from('air_bookings').update({ status: 'cancelled' }).match(matchOn)
+          }
+          continue
+        }
+
+        if (action === 'update') {
+          if (Object.keys(matchOn).length) {
+            await supabase.from('air_bookings').update(fields).match(matchOn)
+          }
+          continue
+        }
+
+        // create — deduplicate by PNR or ticket number
         const orParts: string[] = []
-        if (a.pnr)           orParts.push(`pnr.eq.${a.pnr}`)
-        if (a.ticket_number) orParts.push(`ticket_number.eq.${a.ticket_number}`)
+        if (fields.pnr)           orParts.push(`pnr.eq.${fields.pnr}`)
+        if (fields.ticket_number) orParts.push(`ticket_number.eq.${fields.ticket_number}`)
 
         let existingId: string | null = null
         if (orParts.length > 0) {
@@ -497,20 +668,20 @@ async function writeExtracted(
 
         const payload = {
           booking_id:         bookingId,
-          passenger_name:     a.passenger_name    ?? null,
-          airline:            a.airline           ?? null,
-          flight_number:      a.flight_number     ?? null,
-          origin:             a.origin            ?? null,
-          destination:        a.destination       ?? null,
-          departure_datetime: a.departure_datetime ?? null,
-          cabin_class:        a.cabin_class       ?? null,
-          pnr:                a.pnr               ?? null,
-          ticket_number:      a.ticket_number     ?? null,
-          fare_inr:           a.fare_inr          ?? null,
-          total_inr:          a.total_inr         ?? null,
-          consolidator:       a.consolidator      ?? null,
-          client_type:        a.client_type       ?? null,
-          corporate_account:  a.corporate_account ?? null,
+          passenger_name:     fields.passenger_name    ?? null,
+          airline:            fields.airline           ?? null,
+          flight_number:      fields.flight_number     ?? null,
+          origin:             fields.origin            ?? null,
+          destination:        fields.destination       ?? null,
+          departure_datetime: fields.departure_datetime ?? null,
+          cabin_class:        fields.cabin_class       ?? null,
+          pnr:                fields.pnr               ?? null,
+          ticket_number:      fields.ticket_number     ?? null,
+          fare_inr:           fields.fare_inr          ?? null,
+          total_inr:          fields.total_inr         ?? null,
+          consolidator:       fields.consolidator      ?? null,
+          client_type:        fields.client_type       ?? null,
+          corporate_account:  fields.corporate_account ?? null,
         }
 
         if (existingId) {
@@ -528,19 +699,37 @@ async function writeExtracted(
   // ---- airport_vip_services ----
   if (parsed.airport_vip_services?.length) {
     for (const s of parsed.airport_vip_services) {
+      const action  = (s.action ?? 'create') as string
+      const matchOn: Record<string, any> = s.match_on ?? {}
+      const fields  = stripMeta(s)
+
       try {
+        if (action === 'cancel') {
+          if (Object.keys(matchOn).length) {
+            await supabase.from('airport_vip_services').update({ status: 'cancelled' }).match(matchOn)
+          }
+          continue
+        }
+
+        if (action === 'update') {
+          if (Object.keys(matchOn).length) {
+            await supabase.from('airport_vip_services').update(fields).match(matchOn)
+          }
+          continue
+        }
+
         await supabase.from('airport_vip_services').insert({
-          booking_id:   bookingId,
-          airport:      s.airport      ?? null,
-          airport_name: s.airport_name ?? null,
-          service_type: s.service_type ?? null,
-          service_date: s.service_date ?? null,
-          flight_number: s.flight_number ?? null,
-          pax_names:    s.pax_names    ?? [],
-          provider:     s.provider     ?? null,
-          status:       s.status       ?? null,
-          cost:         s.cost         ?? null,
-          currency:     s.currency     ?? null,
+          booking_id:    bookingId,
+          airport:       fields.airport      ?? null,
+          airport_name:  fields.airport_name ?? null,
+          service_type:  fields.service_type ?? null,
+          service_date:  fields.service_date ?? null,
+          flight_number: fields.flight_number ?? null,
+          pax_names:     fields.pax_names    ?? [],
+          provider:      fields.provider     ?? null,
+          status:        fields.status       ?? null,
+          cost:          fields.cost         ?? null,
+          currency:      fields.currency     ?? null,
         })
       } catch (err) {
         console.error('Airport VIP service write failed:', err)
@@ -552,20 +741,31 @@ async function writeExtracted(
   // ---- enquiries (always insert — one thread may have multiple) ----
   if (parsed.enquiries?.length) {
     for (const e of parsed.enquiries) {
+      const action  = (e.action ?? 'create') as string
+      const matchOn: Record<string, any> = e.match_on ?? {}
+      const fields  = stripMeta(e)
+
       try {
+        if (action === 'update') {
+          if (Object.keys(matchOn).length) {
+            await supabase.from('enquiries').update(fields).match(matchOn)
+          }
+          continue
+        }
+
         await supabase.from('enquiries').insert({
           email_id:        emailId,
-          client_name:     e.client_name     ?? null,
-          property_name:   e.property_name   ?? null,
-          destination:     e.destination     ?? null,
-          check_in:        e.check_in        ?? null,
-          check_out:       e.check_out       ?? null,
-          num_rooms:       e.num_rooms       ?? null,
-          num_adults:      e.num_adults      ?? null,
-          quoted_rate:     e.quoted_rate     ?? null,
-          quoted_currency: e.quoted_currency ?? null,
-          notes:           e.notes           ?? null,
-          misc:            e.misc            ?? null,
+          client_name:     fields.client_name     ?? null,
+          property_name:   fields.property_name   ?? null,
+          destination:     fields.destination     ?? null,
+          check_in:        fields.check_in        ?? null,
+          check_out:       fields.check_out       ?? null,
+          num_rooms:       fields.num_rooms       ?? null,
+          num_adults:      fields.num_adults      ?? null,
+          quoted_rate:     fields.quoted_rate     ?? null,
+          quoted_currency: fields.quoted_currency ?? null,
+          notes:           fields.notes           ?? null,
+          misc:            fields.misc            ?? null,
         })
       } catch (err) {
         console.error('Enquiry write failed:', err)
@@ -577,20 +777,31 @@ async function writeExtracted(
   // ---- visa_tracking ----
   if (parsed.visa_tracking?.length) {
     for (const v of parsed.visa_tracking) {
-      if (!v.client_name) continue
+      const action  = (v.action ?? 'create') as string
+      const matchOn: Record<string, any> = v.match_on ?? {}
+      const fields  = stripMeta(v)
+
+      if (!fields.client_name && action === 'create') continue
       try {
-        const clientId = await resolveClient(v.client_name).catch(() => null)
+        if (action === 'update') {
+          if (Object.keys(matchOn).length) {
+            await supabase.from('visa_tracking').update(fields).match(matchOn)
+          }
+          continue
+        }
+
+        const clientId = await resolveClient(fields.client_name).catch(() => null)
         await supabase.from('visa_tracking').insert({
           client_id:           clientId,
-          client_name:         v.client_name         ?? null,
-          destination_country: v.destination_country ?? null,
-          nationality:         v.nationality         ?? null,
-          visa_required:       v.visa_required        ?? null,
-          visa_type:           v.visa_type            ?? null,
-          visa_status:         v.visa_status          ?? null,
-          application_date:    v.application_date     ?? null,
-          expected_date:       v.expected_date        ?? null,
-          notes:               v.notes               ?? null,
+          client_name:         fields.client_name         ?? null,
+          destination_country: fields.destination_country ?? null,
+          nationality:         fields.nationality         ?? null,
+          visa_required:       fields.visa_required        ?? null,
+          visa_type:           fields.visa_type            ?? null,
+          visa_status:         fields.visa_status          ?? null,
+          application_date:    fields.application_date     ?? null,
+          expected_date:       fields.expected_date        ?? null,
+          notes:               fields.notes               ?? null,
         })
       } catch (err) {
         console.error('Visa tracking write failed:', err)

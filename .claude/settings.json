@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C c:/Users/Keshav/Desktop/pureluxe-inbox commit -m ' *)",
+      "Bash(git -C \"c:/Users/Keshav/Desktop/pureluxe-inbox\" add lib/store.ts)",
+      "Bash(git -C \"c:/Users/Keshav/Desktop/pureluxe-inbox\" add lib/extract.ts supabase/schema.sql)"
+    ]
+  }
+}

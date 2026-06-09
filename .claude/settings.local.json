@@ -5,7 +5,8 @@
       "Bash(git commit *)",
       "Bash(git push *)",
       "Bash(node -e \"const p = require\\('./package.json'\\); console.log\\(JSON.stringify\\(Object.keys\\(p.dependencies\\)\\)\\)\")",
-      "Bash(npm install *)"
+      "Bash(npm install *)",
+      "Bash(git -C c:/Users/Keshav/Desktop/pureluxe-inbox commit -m ' *)"
     ]
   }
 }
