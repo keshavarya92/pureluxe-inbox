@@ -13,7 +13,10 @@ if (!process.env.ANTHROPIC_API_KEY) {
   throw new Error('Missing ANTHROPIC_API_KEY environment variable')
 }
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  defaultHeaders: { 'anthropic-beta': 'prompt-caching-2024-07-31' },
+})
 
 // ----------------------------------------------------------------
 // Relationship resolution
@@ -294,6 +297,8 @@ async function writeExtracted(
   emailId: string,
   inboxAddress: string,
 ): Promise<number> {
+  console.log(`[extract] ${emailId} parsed:`, JSON.stringify(parsed, null, 2))
+
   let tablesWritten    = 0
   let bookingId:       string | null = null
   let primaryClientId: string | null = null
