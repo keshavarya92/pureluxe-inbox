@@ -861,6 +861,61 @@ async function writeExtracted(
 }
 
 // ----------------------------------------------------------------
+// Stage 1: free hard filter — no API call
+// ----------------------------------------------------------------
+
+const NOISE_SENDER_FRAGMENTS = [
+  'noreply', 'no-reply', 'donotreply', 'newsletter', 'marketing',
+  'notifications', 'updates@', 'alerts@',
+]
+
+const NOISE_DOMAINS = [
+  '@klm-mail.com', '@nexusdmc.com', '@tourishdmc.com', '@collezioneem.com',
+  '@travellermade.com', '@ethiopianairlines.com', '@aviareps.com',
+]
+
+const NOISE_SUBJECT_PHRASES = [
+  'unsubscribe', 'newsletter', 'vote for', 'last chance to vote',
+  'promotional', 'special offer', 'fixed departures', 'b2b packages',
+]
+
+function isStage1Noise(fromEmail: string, subject: string): boolean {
+  const from = fromEmail.toLowerCase()
+  const sub  = subject.toLowerCase()
+  return (
+    NOISE_SENDER_FRAGMENTS.some(f => from.includes(f)) ||
+    NOISE_DOMAINS.some(d => from.endsWith(d)) ||
+    NOISE_SUBJECT_PHRASES.some(p => sub.includes(p))
+  )
+}
+
+// ----------------------------------------------------------------
+// Stage 2: Haiku noise gate — cheap single-token answer
+// ----------------------------------------------------------------
+
+async function isStage2Noise(subject: string, snippet: string): Promise<boolean> {
+  const response = await client.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 5,
+    messages: [{
+      role: 'user',
+      content:
+        `Is this email clearly a newsletter, marketing promotion, trade circular, ` +
+        `automated notification, or social media digest with no actionable travel ` +
+        `business content? Reply with only YES or NO. When in doubt, reply NO.\n\n` +
+        `Subject: ${subject}\nSnippet: ${snippet}`,
+    }],
+  })
+  const answer = response.content
+    .filter(b => b.type === 'text')
+    .map(b => (b as { type: 'text'; text: string }).text)
+    .join('')
+    .trim()
+    .toUpperCase()
+  return answer.startsWith('YES')
+}
+
+// ----------------------------------------------------------------
 // Mark processed
 // ----------------------------------------------------------------
 
@@ -884,8 +939,10 @@ export interface ExtractionResult {
 }
 
 /**
- * Process a single email: gather content, call Sonnet, write to all tables.
- * Returns the number of tables written.
+ * Process a single email through two noise filters then Sonnet extraction.
+ * Stage 1: free hard filter on sender/subject patterns.
+ * Stage 2: Haiku single-token noise gate on subject + snippet.
+ * Stage 3: full Sonnet extraction.
  */
 export async function processEmail(
   email: {
@@ -900,6 +957,23 @@ export async function processEmail(
   },
   gmail: any | null,
 ): Promise<number> {
+  // Stage 1 — free hard filter
+  if (isStage1Noise(email.from_email, email.subject)) {
+    console.log(`[filter] stage1_skip ${email.id}`)
+    await markExtracted(email.id)
+    return 0
+  }
+
+  // Stage 2 — Haiku noise gate
+  const noise = await isStage2Noise(email.subject, email.snippet).catch(() => false)
+  if (noise) {
+    console.log(`[filter] haiku_skip ${email.id}`)
+    await markExtracted(email.id)
+    return 0
+  }
+
+  console.log(`[filter] sonnet_process ${email.id}`)
+
   const parsed = await extractFromEmail(
     {
       id:            email.id,
@@ -918,8 +992,8 @@ export async function processEmail(
 }
 
 /**
- * Batch runner: fetches up to 5 unextracted emails and runs Sonnet on each.
- * No content-based filtering — every email goes through the AI regardless.
+ * Batch runner: fetches up to 5 unextracted emails and runs them through
+ * stage-1 hard filter → stage-2 Haiku gate → stage-3 Sonnet extraction.
  */
 export async function runExtraction(): Promise<ExtractionResult> {
   const { data: emails, error } = await supabase
