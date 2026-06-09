@@ -248,9 +248,15 @@ async function extractFromEmail(
   const callSonnet = () => anthropic.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 4096,
-    system: getSystemPrompt(),
+    system: [
+      {
+        type: 'text',
+        text: getSystemPrompt(),
+        cache_control: { type: 'ephemeral' },
+      },
+    ],
     messages: [{ role: 'user', content: blocks }],
-  })
+  } as any)
 
   let response: Awaited<ReturnType<typeof callSonnet>>
   try {
