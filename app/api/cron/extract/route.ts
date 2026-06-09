@@ -9,7 +9,6 @@ async function handler(req: NextRequest) {
   }
 
   try {
-    // Check backlog before processing so we know whether to chain immediately
     const { count: backlog } = await supabase
       .from('inbox_emails')
       .select('id', { count: 'exact', head: true })
@@ -17,17 +16,6 @@ async function handler(req: NextRequest) {
       .throwOnError()
 
     const result = await runExtraction()
-
-    // If there is still a backlog, chain the next run after a 10 s pause
-    // (prevents parallel runs stacking up) — fire and forget
-    if ((backlog ?? 0) > 0) {
-      setTimeout(() => {
-        fetch('https://pureluxe-inbox.vercel.app/api/cron/extract', {
-          method: 'GET',
-          headers: { Authorization: 'Bearer ' + process.env.CRON_SECRET },
-        }).catch(() => {})
-      }, 10000)
-    }
 
     return NextResponse.json({ ...result, backlog: backlog ?? 0 })
   } catch (err: any) {
