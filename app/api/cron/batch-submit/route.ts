@@ -8,7 +8,6 @@ import {
   getSystemPrompt,
   markExtracted,
   classifyEmailTier,
-  collectPartFilenames,
 } from '@/lib/extract'
 import { fetchAttachments, extractTextFromAttachment } from '@/lib/attachments'
 
@@ -89,7 +88,7 @@ async function handler(req: NextRequest) {
     .from('inbox_emails')
     .select('id, subject, from_email, to_addresses, email_date, snippet, body, inbox_address')
     .eq('booking_extracted', false)
-    .limit(500)
+    .limit(100)
 
   if (fetchError) throw new Error(fetchError.message)
 
@@ -123,16 +122,8 @@ async function handler(req: NextRequest) {
       ? getGmailClient(user.access_token, user.refresh_token)
       : null
 
-    // Get attachment filenames for tier classification
-    let attachmentFilenames: string[] = []
-    if (gmail) {
-      try {
-        const meta = await gmail.users.messages.get({ userId: 'me', id: email.id, format: 'full' })
-        attachmentFilenames = collectPartFilenames(meta.data.payload ?? {})
-      } catch { /* ignore — tier 2 */ }
-    }
-
-    const tier = classifyEmailTier(email.from_email, attachmentFilenames)
+    // Classify by from_email only — skip per-email Gmail metadata calls to stay within timeout
+    const tier = classifyEmailTier(email.from_email, [])
 
     const blocks: any[] = [{
       type: 'text',
