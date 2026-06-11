@@ -40,7 +40,8 @@ async function handler(req: NextRequest) {
 
       // Collect all results in one pass
       const results: any[] = []
-      for await (const result of client.beta.messages.batches.results(batch.batch_id)) {
+      const stream = await client.beta.messages.batches.results(batch.batch_id)
+      for await (const result of stream) {
         results.push(result)
       }
 
