@@ -165,7 +165,7 @@ async function handler(req: NextRequest) {
       custom_id: email.id,
       params: {
         model: 'claude-sonnet-4-6',
-        max_tokens: 4096,
+        max_tokens: 8192,
         system: [{ type: 'text', text: getSystemPrompt(), cache_control: { type: 'ephemeral', ttl: '1h' } }] as any,
         messages: [{ role: 'user', content: blocks }],
       },
