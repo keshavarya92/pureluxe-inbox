@@ -40,7 +40,7 @@
     },
     {
       "path": "/api/cron/batch-submit",
-      "schedule": "0 */6 * * *"
+      "schedule": "0 * * * *"
     }
   ]
 }
