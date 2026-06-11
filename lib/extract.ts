@@ -921,11 +921,13 @@ const NOISE_SENDER_FRAGMENTS = [
   'noreply', 'no-reply', 'donotreply', 'newsletter', 'marketing',
   'notifications', 'updates@', 'alerts@',
   '@pinterest.com', '@squareup.com', '@survey.', '@feedback.', 'feedback@',
+  '@axisbankmail.', '@adidas.',
 ]
 
 const NOISE_DOMAINS = [
   '@klm-mail.com', '@nexusdmc.com', '@tourishdmc.com', '@collezioneem.com',
   '@travellermade.com', '@ethiopianairlines.com', '@aviareps.com',
+  '@naukri.com', '@paisabazaar.com',
 ]
 
 const NOISE_SUBJECT_PHRASES = [
