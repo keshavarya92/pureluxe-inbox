@@ -365,6 +365,10 @@ export async function writeExtracted(
         if (action === 'cancel') {
           if (Object.keys(matchOn).length) {
             await supabase.from('bookings').update({ status: 'cancelled' }).match(matchOn)
+            if (!bookingId) {
+              const { data: found } = await supabase.from('bookings').select('id').match(matchOn).maybeSingle()
+              if (found) bookingId = found.id
+            }
           }
           continue
         }
@@ -379,6 +383,10 @@ export async function writeExtracted(
           if (clientId   !== null) updatePayload.client_id   = clientId
           if (propertyId !== null) updatePayload.property_id = propertyId
           await supabase.from('bookings').update(updatePayload).match(matchOn)
+          if (!bookingId) {
+            const { data: found } = await supabase.from('bookings').select('id').match(matchOn).maybeSingle()
+            if (found) bookingId = found.id
+          }
           continue
         }
 
@@ -709,8 +717,44 @@ export async function writeExtracted(
         }
 
         if (action === 'update') {
-          if (Object.keys(matchOn).length) {
-            await supabase.from('air_bookings').update(fields).match(matchOn)
+          // Find the record by PNR or ticket_number (sequential eq, not AND-match)
+          let updateTargetId: string | null = null
+          if (matchOn.pnr) {
+            const { data } = await supabase.from('air_bookings').select('id').eq('pnr', matchOn.pnr).maybeSingle()
+            updateTargetId = data?.id ?? null
+          }
+          if (!updateTargetId && matchOn.ticket_number) {
+            const { data } = await supabase.from('air_bookings').select('id').eq('ticket_number', matchOn.ticket_number).maybeSingle()
+            updateTargetId = data?.id ?? null
+          }
+          if (!updateTargetId && matchOn.amadeus_ref) {
+            const { data } = await supabase.from('air_bookings').select('id').eq('amadeus_ref', matchOn.amadeus_ref).maybeSingle()
+            updateTargetId = data?.id ?? null
+          }
+          if (updateTargetId) {
+            const updatePayload = {
+              passenger_name:     fields.passenger_name    ?? undefined,
+              airline:            fields.airline           ?? undefined,
+              flight_number:      fields.flight_number     ?? undefined,
+              origin:             fields.origin            ?? undefined,
+              destination:        fields.destination       ?? undefined,
+              departure_datetime: fields.departure_datetime ?? undefined,
+              cabin_class:        fields.cabin_class       ?? undefined,
+              pnr:                fields.pnr               ?? undefined,
+              ticket_number:      fields.ticket_number     ?? undefined,
+              fare_inr:           fields.fare_inr          ?? undefined,
+              total_inr:          fields.total_inr         ?? undefined,
+              consolidator:       fields.consolidator      ?? undefined,
+              client_type:        fields.client_type       ?? undefined,
+              corporate_account:  fields.corporate_account ?? undefined,
+              status:             fields.status            ?? undefined,
+            }
+            // Strip undefined so we don't overwrite existing values with null
+            const cleanPayload = Object.fromEntries(Object.entries(updatePayload).filter(([, v]) => v !== undefined))
+            console.log(`[write] air_bookings update id=${updateTargetId}`, JSON.stringify(cleanPayload))
+            await supabase.from('air_bookings').update(cleanPayload).eq('id', updateTargetId)
+          } else {
+            console.log(`[write] air_bookings update — no matching record found for`, JSON.stringify(matchOn))
           }
           continue
         }
