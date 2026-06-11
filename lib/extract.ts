@@ -364,10 +364,13 @@ export async function writeExtracted(
       try {
         if (action === 'cancel') {
           if (Object.keys(matchOn).length) {
-            await supabase.from('bookings').update({ status: 'cancelled' }).match(matchOn)
+            console.log(`[write] bookings cancel`, JSON.stringify(matchOn))
+            const { error: cancelErr } = await supabase.from('bookings').update({ status: 'cancelled' }).match(matchOn)
+            if (cancelErr) console.error(`[write] bookings cancel error`, cancelErr.message)
             if (!bookingId) {
               const { data: found } = await supabase.from('bookings').select('id').match(matchOn).maybeSingle()
               if (found) bookingId = found.id
+              else console.log(`[write] bookings cancel — no matching row for`, JSON.stringify(matchOn))
             }
           }
           continue
