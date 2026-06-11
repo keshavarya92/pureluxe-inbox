@@ -399,13 +399,12 @@ export async function writeExtracted(
         if (!primaryClientId) primaryClientId = clientId
         if (!primaryPropId)   primaryPropId   = propertyId
 
-        const orParts: string[] = []
-        if (fields.hotel_ref)   orParts.push(`hotel_ref.eq.${fields.hotel_ref}`)
-        if (fields.amadeus_ref) orParts.push(`amadeus_ref.eq.${fields.amadeus_ref}`)
-
+        // Dedup by hotel_ref only — amadeus_ref is trip-level and shared across
+        // all hotels in an itinerary, so it would cause multi-hotel itineraries
+        // to overwrite the same row instead of creating separate booking records.
         let existingId: string | null = null
-        if (orParts.length > 0) {
-          const { data } = await supabase.from('bookings').select('id').or(orParts.join(',')).maybeSingle()
+        if (fields.hotel_ref) {
+          const { data } = await supabase.from('bookings').select('id').eq('hotel_ref', fields.hotel_ref).maybeSingle()
           existingId = data?.id ?? null
         }
 
