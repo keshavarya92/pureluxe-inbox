@@ -17,6 +17,9 @@
     "app/api/cron/extract/route.ts": {
       "maxDuration": 300
     },
+    "app/api/cron/batch-submit/route.ts": {
+      "maxDuration": 300
+    },
     "app/api/admin/extract/route.ts": {
       "maxDuration": 300
     },
@@ -36,8 +39,8 @@
       "schedule": "*/15 * * * *"
     },
     {
-      "path": "/api/cron/extract",
-      "schedule": "*/30 * * * *"
+      "path": "/api/cron/batch-submit",
+      "schedule": "0 */6 * * *"
     }
   ]
 }

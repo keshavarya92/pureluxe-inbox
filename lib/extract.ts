@@ -130,7 +130,7 @@ function getSchemaDescription(): string {
 
 let _systemPromptCache: string | null = null
 
-function getSystemPrompt(): string {
+export function getSystemPrompt(): string {
   if (_systemPromptCache) return _systemPromptCache
 
   _systemPromptCache = `You are the AI operations backbone for PureLuxe International (KFT Corporation, Mumbai) — a luxury travel agency managing high-value hotel bookings, client relationships, air travel, and supplier networks across the globe.
@@ -171,6 +171,37 @@ Return ONLY valid JSON with this exact structure. Use null for tables where the 
 }
 
 // ----------------------------------------------------------------
+// Tiered processing classifier
+// ----------------------------------------------------------------
+
+const TIER3_SENDER_KEYWORDS = ['reservations', 'res.', 'confirmation', 'booking']
+
+const HIGH_VALUE_ATTACHMENT_KEYWORDS = [
+  'confirmation', 'voucher', 'booking', 'passport', 'visa',
+  'invoice', 'contract', 'agreement', 'itinerary',
+]
+
+// Walk a Gmail message payload tree and collect all attachment filenames.
+// Works on the response from messages.get({ format: 'full' }) — no separate
+// attachment downloads needed since large attachments are referenced by attachmentId.
+// Walk a Gmail message payload tree and collect attachment filenames (no attachment data downloaded).
+export function collectPartFilenames(payload: any): string[] {
+  const names: string[] = []
+  if (payload?.filename?.length) names.push(payload.filename.toLowerCase())
+  for (const child of payload?.parts ?? []) names.push(...collectPartFilenames(child))
+  return names
+}
+
+// Returns 2 (text-only) or 3 (full attachment processing).
+// Tier 1 is handled upstream by the Stage 1/2 noise filters before this is called.
+export function classifyEmailTier(fromEmail: string, attachmentFilenames: string[]): 2 | 3 {
+  const from = fromEmail.toLowerCase()
+  if (TIER3_SENDER_KEYWORDS.some(k => from.includes(k))) return 3
+  if (attachmentFilenames.some(fn => HIGH_VALUE_ATTACHMENT_KEYWORDS.some(kw => fn.includes(kw)))) return 3
+  return 2
+}
+
+// ----------------------------------------------------------------
 // Step 1 + 2: gather all content and run a single Sonnet call
 // ----------------------------------------------------------------
 
@@ -197,8 +228,19 @@ async function extractFromEmail(
     text: `FROM: ${email.from}\nTO: ${email.to.join(', ')}\nDATE: ${email.date}\nSUBJECT: ${email.subject}\n\n${email.body || email.snippet}`,
   })
 
-  // Attachments
+  // Fetch attachment filenames for tier classification (lightweight — no attachment data yet)
+  let attachmentFilenames: string[] = []
   if (gmail) {
+    try {
+      const meta = await gmail.users.messages.get({ userId: 'me', id: email.id, format: 'full' })
+      attachmentFilenames = collectPartFilenames(meta.data.payload ?? {})
+    } catch { /* ignore — default to tier 2 */ }
+  }
+
+  const tier = classifyEmailTier(email.from, attachmentFilenames)
+  console.log(`[tier] ${tier === 3 ? '3_with_attachments' : '2_text_only'} ${email.id}`)
+
+  if (tier === 3 && gmail) {
     let attachments: Attachment[] = []
     try {
       attachments = await fetchAttachments(gmail, email.id)
@@ -300,7 +342,7 @@ function stripMeta(obj: Record<string, any>): Record<string, any> {
   return rest
 }
 
-async function writeExtracted(
+export async function writeExtracted(
   parsed: Record<string, any>,
   emailId: string,
   inboxAddress: string,
@@ -395,22 +437,20 @@ async function writeExtracted(
         }
 
         if (existingId) {
+          console.log(`[write] bookings update id=${existingId}`, JSON.stringify(payload))
           await supabase.from('bookings').update(payload).eq('id', existingId)
           if (!bookingId) bookingId = existingId
         } else {
+          console.log(`[write] bookings insert`, JSON.stringify(payload))
           const { data, error } = await supabase.from('bookings').insert(payload).select('id').single()
           if (error) throw new Error(`bookings insert: ${error.message}`)
           if (!bookingId) bookingId = data?.id ?? null
 
           if (data?.id && !parsed.commissions?.length && (fields.commission_rate || fields.commission_expected)) {
             try {
-              await supabase.from('commissions').insert({
-                booking_id:      data.id,
-                amount_expected: fields.commission_expected ?? null,
-                currency:        fields.currency            ?? null,
-                channel:         fields.commission_channel  ?? null,
-                status:          'pending',
-              })
+              const autoComm = { booking_id: data.id, amount_expected: fields.commission_expected ?? null, currency: fields.currency ?? null, channel: fields.commission_channel ?? null, status: 'pending' }
+              console.log(`[write] commissions auto-insert`, JSON.stringify(autoComm))
+              await supabase.from('commissions').insert(autoComm)
             } catch (err) {
               console.error('Auto-commission insert failed:', err)
             }
@@ -445,17 +485,9 @@ async function writeExtracted(
           continue
         }
 
-        await supabase.from('commissions').insert({
-          booking_id:      bookingId,
-          amount_expected: fields.amount_expected ?? null,
-          currency:        fields.currency        ?? null,
-          channel:         fields.channel         ?? null,
-          status:          fields.status          ?? 'pending',
-          date_received:   fields.date_received   ?? null,
-          bank_ref:        fields.bank_ref         ?? null,
-          notes:           fields.notes           ?? null,
-          misc:            fields.misc            ?? null,
-        })
+        const commPayload = { booking_id: bookingId, amount_expected: fields.amount_expected ?? null, currency: fields.currency ?? null, channel: fields.channel ?? null, status: fields.status ?? 'pending', date_received: fields.date_received ?? null, bank_ref: fields.bank_ref ?? null, notes: fields.notes ?? null, misc: fields.misc ?? null }
+        console.log(`[write] commissions insert`, JSON.stringify(commPayload))
+        await supabase.from('commissions').insert(commPayload)
       } catch (err) {
         console.error('Commission write failed:', err)
       }
@@ -484,9 +516,11 @@ async function writeExtracted(
         const { data: existing } = await supabase
           .from('clients').select('id').ilike('full_name', fields.full_name).maybeSingle()
         if (existing) {
+          console.log(`[write] clients update id=${existing.id}`, JSON.stringify(fields))
           await supabase.from('clients').update({ ...fields, misc: fields.misc ?? null }).eq('id', existing.id)
           if (!primaryClientId) primaryClientId = existing.id
         } else {
+          console.log(`[write] clients insert`, JSON.stringify(fields))
           const { data } = await supabase.from('clients')
             .insert({ ...fields, misc: fields.misc ?? null }).select('id').single()
           if (!primaryClientId) primaryClientId = data?.id ?? null
@@ -516,13 +550,9 @@ async function writeExtracted(
 
         const clientId = await resolveClient(fields.client_name).catch(() => null)
         if (!clientId) continue
-        await supabase.from('client_preferences').insert({
-          client_id:       clientId,
-          category:        fields.category        ?? null,
-          preference:      fields.preference      ?? null,
-          preference_type: fields.preference_type ?? null,
-          notes:           fields.notes           ?? null,
-        })
+        const prefPayload = { client_id: clientId, category: fields.category ?? null, preference: fields.preference ?? null, preference_type: fields.preference_type ?? null, notes: fields.notes ?? null }
+        console.log(`[write] client_preferences insert`, JSON.stringify(prefPayload))
+        await supabase.from('client_preferences').insert(prefPayload)
       } catch (err) {
         console.error('Client preference write failed:', err)
       }
@@ -548,13 +578,9 @@ async function writeExtracted(
 
         const clientId = await resolveClient(fields.client_name).catch(() => null)
         if (!clientId) continue
-        await supabase.from('client_health_notes').insert({
-          client_id:            clientId,
-          condition:            fields.condition            ?? null,
-          details:              fields.details              ?? null,
-          dietary_restrictions: fields.dietary_restrictions ?? [],
-          mobility_notes:       fields.mobility_notes       ?? null,
-        })
+        const healthPayload = { client_id: clientId, condition: fields.condition ?? null, details: fields.details ?? null, dietary_restrictions: fields.dietary_restrictions ?? [], mobility_notes: fields.mobility_notes ?? null }
+        console.log(`[write] client_health_notes insert`, JSON.stringify(healthPayload))
+        await supabase.from('client_health_notes').insert(healthPayload)
       } catch (err) {
         console.error('Health notes write failed:', err)
       }
@@ -590,8 +616,10 @@ async function writeExtracted(
           department:  fields.department ?? null,
         }
         if (fields.email) {
+          console.log(`[write] property_contacts upsert`, JSON.stringify(payload))
           await supabase.from('property_contacts').upsert(payload, { onConflict: 'email' })
         } else {
+          console.log(`[write] property_contacts insert`, JSON.stringify(payload))
           await supabase.from('property_contacts').insert(payload)
         }
       } catch (err) {
@@ -620,8 +648,10 @@ async function writeExtracted(
         const { data: existing } = await supabase
           .from('properties').select('id').ilike('name', fields.name).maybeSingle()
         if (existing) {
+          console.log(`[write] properties update id=${existing.id}`, JSON.stringify(fields))
           await supabase.from('properties').update(fields).eq('id', existing.id)
         } else {
+          console.log(`[write] properties insert`, JSON.stringify(fields))
           await supabase.from('properties').insert(fields)
         }
       } catch (err) {
@@ -653,12 +683,9 @@ async function writeExtracted(
           continue
         }
 
-        await supabase.from('pre_stay_tasks').insert({
-          booking_id:  bookingId,
-          task_type:   fields.task_type   ?? null,
-          description: fields.description ?? null,
-          due_date:    fields.due_date     ?? null,
-        })
+        const taskPayload = { booking_id: bookingId, task_type: fields.task_type ?? null, description: fields.description ?? null, due_date: fields.due_date ?? null }
+        console.log(`[write] pre_stay_tasks insert`, JSON.stringify(taskPayload))
+        await supabase.from('pre_stay_tasks').insert(taskPayload)
       } catch (err) {
         console.error('Pre-stay task write failed:', err)
       }
@@ -688,14 +715,14 @@ async function writeExtracted(
           continue
         }
 
-        // create — deduplicate by PNR or ticket number
-        const orParts: string[] = []
-        if (fields.pnr)           orParts.push(`pnr.eq.${fields.pnr}`)
-        if (fields.ticket_number) orParts.push(`ticket_number.eq.${fields.ticket_number}`)
-
+        // create — deduplicate by PNR then ticket_number (separate queries to avoid .or() issues with special chars)
         let existingId: string | null = null
-        if (orParts.length > 0) {
-          const { data } = await supabase.from('air_bookings').select('id').or(orParts.join(',')).maybeSingle()
+        if (fields.pnr) {
+          const { data } = await supabase.from('air_bookings').select('id').eq('pnr', fields.pnr).maybeSingle()
+          existingId = data?.id ?? null
+        }
+        if (!existingId && fields.ticket_number) {
+          const { data } = await supabase.from('air_bookings').select('id').eq('ticket_number', fields.ticket_number).maybeSingle()
           existingId = data?.id ?? null
         }
 
@@ -718,8 +745,10 @@ async function writeExtracted(
         }
 
         if (existingId) {
+          console.log(`[write] air_bookings update id=${existingId}`, JSON.stringify(payload))
           await supabase.from('air_bookings').update(payload).eq('id', existingId)
         } else {
+          console.log(`[write] air_bookings insert`, JSON.stringify(payload))
           await supabase.from('air_bookings').insert(payload)
         }
       } catch (err) {
@@ -751,19 +780,9 @@ async function writeExtracted(
           continue
         }
 
-        await supabase.from('airport_vip_services').insert({
-          booking_id:    bookingId,
-          airport:       fields.airport      ?? null,
-          airport_name:  fields.airport_name ?? null,
-          service_type:  fields.service_type ?? null,
-          service_date:  fields.service_date ?? null,
-          flight_number: fields.flight_number ?? null,
-          pax_names:     fields.pax_names    ?? [],
-          provider:      fields.provider     ?? null,
-          status:        fields.status       ?? null,
-          cost:          fields.cost         ?? null,
-          currency:      fields.currency     ?? null,
-        })
+        const vipPayload = { booking_id: bookingId, airport: fields.airport ?? null, airport_name: fields.airport_name ?? null, service_type: fields.service_type ?? null, service_date: fields.service_date ?? null, flight_number: fields.flight_number ?? null, pax_names: fields.pax_names ?? [], provider: fields.provider ?? null, status: fields.status ?? null, cost: fields.cost ?? null, currency: fields.currency ?? null }
+        console.log(`[write] airport_vip_services insert`, JSON.stringify(vipPayload))
+        await supabase.from('airport_vip_services').insert(vipPayload)
       } catch (err) {
         console.error('Airport VIP service write failed:', err)
       }
@@ -786,20 +805,9 @@ async function writeExtracted(
           continue
         }
 
-        await supabase.from('enquiries').insert({
-          email_id:        emailId,
-          client_name:     fields.client_name     ?? null,
-          property_name:   fields.property_name   ?? null,
-          destination:     fields.destination     ?? null,
-          check_in:        fields.check_in        ?? null,
-          check_out:       fields.check_out       ?? null,
-          num_rooms:       fields.num_rooms       ?? null,
-          num_adults:      fields.num_adults      ?? null,
-          quoted_rate:     fields.quoted_rate     ?? null,
-          quoted_currency: fields.quoted_currency ?? null,
-          notes:           fields.notes           ?? null,
-          misc:            fields.misc            ?? null,
-        })
+        const enquiryPayload = { email_id: emailId, client_name: fields.client_name ?? null, property_name: fields.property_name ?? null, destination: fields.destination ?? null, check_in: fields.check_in ?? null, check_out: fields.check_out ?? null, num_rooms: fields.num_rooms ?? null, num_adults: fields.num_adults ?? null, quoted_rate: fields.quoted_rate ?? null, quoted_currency: fields.quoted_currency ?? null, notes: fields.notes ?? null, misc: fields.misc ?? null }
+        console.log(`[write] enquiries insert`, JSON.stringify(enquiryPayload))
+        await supabase.from('enquiries').insert(enquiryPayload)
       } catch (err) {
         console.error('Enquiry write failed:', err)
       }
@@ -824,18 +832,19 @@ async function writeExtracted(
         }
 
         const clientId = await resolveClient(fields.client_name).catch(() => null)
-        await supabase.from('visa_tracking').insert({
+        const visaPayload = {
           client_id:           clientId,
-          client_name:         fields.client_name         ?? null,
           destination_country: fields.destination_country ?? null,
           nationality:         fields.nationality         ?? null,
-          visa_required:       fields.visa_required        ?? null,
-          visa_type:           fields.visa_type            ?? null,
-          visa_status:         fields.visa_status          ?? null,
-          application_date:    fields.application_date     ?? null,
-          expected_date:       fields.expected_date        ?? null,
+          visa_required:       fields.visa_required       ?? null,
+          visa_type:           fields.visa_type           ?? null,
+          visa_status:         fields.visa_status         ?? null,
+          application_date:    fields.application_date    ?? null,
+          expected_date:       fields.expected_date       ?? null,
           notes:               fields.notes               ?? null,
-        })
+        }
+        console.log(`[write] visa_tracking insert`, JSON.stringify(visaPayload))
+        await supabase.from('visa_tracking').insert(visaPayload)
       } catch (err) {
         console.error('Visa tracking write failed:', err)
       }
@@ -884,7 +893,7 @@ const NOISE_SUBJECT_PHRASES = [
   'trade circular', 'fam trip invitation',
 ]
 
-function isStage1Noise(fromEmail: string, subject: string): boolean {
+export function isStage1Noise(fromEmail: string, subject: string): boolean {
   const from = fromEmail.toLowerCase()
   const sub  = subject.toLowerCase()
   return (
@@ -925,7 +934,7 @@ async function isStage2Noise(subject: string, snippet: string): Promise<boolean>
 // Mark processed
 // ----------------------------------------------------------------
 
-async function markExtracted(emailId: string): Promise<void> {
+export async function markExtracted(emailId: string): Promise<void> {
   const { error } = await supabase
     .from('inbox_emails')
     .update({ booking_extracted: true })
@@ -1006,7 +1015,7 @@ export async function runExtraction(): Promise<ExtractionResult> {
     .from('inbox_emails')
     .select('id, subject, from_email, to_addresses, email_date, snippet, body, inbox_address')
     .eq('booking_extracted', false)
-    .limit(5)
+    .limit(3)
 
   if (error) throw new Error(error.message)
 
