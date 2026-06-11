@@ -717,45 +717,44 @@ export async function writeExtracted(
         }
 
         if (action === 'update') {
-          // Find the record by PNR or ticket_number (sequential eq, not AND-match)
-          let updateTargetId: string | null = null
-          if (matchOn.pnr) {
-            const { data } = await supabase.from('air_bookings').select('id').eq('pnr', matchOn.pnr).maybeSingle()
-            updateTargetId = data?.id ?? null
+          const rawPayload = {
+            passenger_name:     fields.passenger_name    ?? undefined,
+            airline:            fields.airline           ?? undefined,
+            flight_number:      fields.flight_number     ?? undefined,
+            origin:             fields.origin            ?? undefined,
+            destination:        fields.destination       ?? undefined,
+            departure_datetime: fields.departure_datetime ?? undefined,
+            cabin_class:        fields.cabin_class       ?? undefined,
+            pnr:                fields.pnr               ?? undefined,
+            ticket_number:      fields.ticket_number     ?? undefined,
+            fare_inr:           fields.fare_inr          ?? undefined,
+            total_inr:          fields.total_inr         ?? undefined,
+            consolidator:       fields.consolidator      ?? undefined,
+            client_type:        fields.client_type       ?? undefined,
+            corporate_account:  fields.corporate_account ?? undefined,
+            status:             fields.status            ?? undefined,
           }
-          if (!updateTargetId && matchOn.ticket_number) {
-            const { data } = await supabase.from('air_bookings').select('id').eq('ticket_number', matchOn.ticket_number).maybeSingle()
-            updateTargetId = data?.id ?? null
-          }
-          if (!updateTargetId && matchOn.amadeus_ref) {
-            const { data } = await supabase.from('air_bookings').select('id').eq('amadeus_ref', matchOn.amadeus_ref).maybeSingle()
-            updateTargetId = data?.id ?? null
-          }
-          if (updateTargetId) {
-            const updatePayload = {
-              passenger_name:     fields.passenger_name    ?? undefined,
-              airline:            fields.airline           ?? undefined,
-              flight_number:      fields.flight_number     ?? undefined,
-              origin:             fields.origin            ?? undefined,
-              destination:        fields.destination       ?? undefined,
-              departure_datetime: fields.departure_datetime ?? undefined,
-              cabin_class:        fields.cabin_class       ?? undefined,
-              pnr:                fields.pnr               ?? undefined,
-              ticket_number:      fields.ticket_number     ?? undefined,
-              fare_inr:           fields.fare_inr          ?? undefined,
-              total_inr:          fields.total_inr         ?? undefined,
-              consolidator:       fields.consolidator      ?? undefined,
-              client_type:        fields.client_type       ?? undefined,
-              corporate_account:  fields.corporate_account ?? undefined,
-              status:             fields.status            ?? undefined,
-            }
-            // Strip undefined so we don't overwrite existing values with null
-            const cleanPayload = Object.fromEntries(Object.entries(updatePayload).filter(([, v]) => v !== undefined))
-            console.log(`[write] air_bookings update id=${updateTargetId}`, JSON.stringify(cleanPayload))
-            await supabase.from('air_bookings').update(cleanPayload).eq('id', updateTargetId)
+          const cleanPayload = Object.fromEntries(Object.entries(rawPayload).filter(([, v]) => v !== undefined))
+          if (!Object.keys(cleanPayload).length) { continue }
+
+          // Build WHERE using most-specific available match key.
+          // ticket_number is unique per passenger; pnr may span multiple rows (all passengers).
+          // Never use .maybeSingle() — multiple rows with same PNR are expected.
+          let q = supabase.from('air_bookings').update(cleanPayload) as any
+          if (matchOn.ticket_number) {
+            q = q.eq('ticket_number', matchOn.ticket_number)
+          } else if (matchOn.pnr && matchOn.passenger_name) {
+            q = q.eq('pnr', matchOn.pnr).eq('passenger_name', matchOn.passenger_name)
+          } else if (matchOn.pnr) {
+            q = q.eq('pnr', matchOn.pnr)
+          } else if (matchOn.amadeus_ref) {
+            q = q.eq('amadeus_ref', matchOn.amadeus_ref)
           } else {
-            console.log(`[write] air_bookings update — no matching record found for`, JSON.stringify(matchOn))
+            console.log(`[write] air_bookings update — no usable match_on`, JSON.stringify(matchOn))
+            continue
           }
+          console.log(`[write] air_bookings update`, JSON.stringify({ match: matchOn, ...cleanPayload }))
+          await q
           continue
         }
 
@@ -869,9 +868,29 @@ export async function writeExtracted(
       if (!fields.client_name && action === 'create') continue
       try {
         if (action === 'update') {
-          if (Object.keys(matchOn).length) {
-            await supabase.from('visa_tracking').update(fields).match(matchOn)
+          if (!Object.keys(matchOn).length) { continue }
+          const visaUpdatePayload: Record<string, any> = {}
+          const visaCols = ['destination_country', 'nationality', 'visa_required', 'visa_type', 'visa_status', 'application_date', 'expected_date', 'notes']
+          for (const col of visaCols) {
+            if (fields[col] !== undefined) visaUpdatePayload[col] = fields[col]
           }
+          if (!Object.keys(visaUpdatePayload).length) { continue }
+          // Resolve client_id from match_on.client_name if present
+          const matchClientId = matchOn.client_name
+            ? await resolveClient(matchOn.client_name).catch(() => null)
+            : null
+          let vq = supabase.from('visa_tracking').update(visaUpdatePayload) as any
+          if (matchClientId) {
+            vq = vq.eq('client_id', matchClientId)
+            if (matchOn.destination_country) vq = vq.eq('destination_country', matchOn.destination_country)
+          } else if (matchOn.destination_country) {
+            vq = vq.eq('destination_country', matchOn.destination_country)
+          } else {
+            console.log(`[write] visa_tracking update — no usable match_on`, JSON.stringify(matchOn))
+            continue
+          }
+          console.log(`[write] visa_tracking update`, JSON.stringify({ match: matchOn, ...visaUpdatePayload }))
+          await vq
           continue
         }
 
