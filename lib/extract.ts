@@ -605,6 +605,7 @@ export async function writeExtracted(
       try {
         if (action === 'update') {
           if (Object.keys(matchOn).length) {
+            console.log(`[write] property_contacts update`, JSON.stringify({ match: matchOn, ...fields }))
             await supabase.from('property_contacts').update(fields).match(matchOn)
           }
           continue
