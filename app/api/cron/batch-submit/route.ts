@@ -5,6 +5,8 @@ import { getGmailClient } from '@/lib/gmail'
 import {
   writeExtracted,
   isStage1Noise,
+  isOfferNoticePlaceholder,
+  writeOfferNoticeEnquiry,
   getSystemPrompt,
   markExtracted,
   classifyEmailTier,
@@ -96,6 +98,7 @@ async function handler(req: NextRequest) {
     return NextResponse.json({
       batch_id: null,
       email_count: 0,
+      offer_notice_count: 0,
       tier2_count: 0,
       tier3_count: 0,
       previous_results_processed: previousResultsProcessed,
@@ -109,11 +112,20 @@ async function handler(req: NextRequest) {
   const requests: any[] = []
   let tier2Count = 0
   let tier3Count = 0
+  let offerNoticeCount = 0
 
   for (const email of emails) {
     // Stage 1 hard filter — mark and skip immediately
     if (isStage1Noise(email.from_email, email.subject)) {
       await markExtracted(email.id)
+      continue
+    }
+
+    // Stage 1b — offer-notice placeholder filter (free — saves Sonnet cost)
+    const offerResult = isOfferNoticePlaceholder(email)
+    if (offerResult.isOffer) {
+      offerNoticeCount++
+      await writeOfferNoticeEnquiry(email.id, email.subject, offerResult)
       continue
     }
 
@@ -176,6 +188,7 @@ async function handler(req: NextRequest) {
     return NextResponse.json({
       batch_id: null,
       email_count: 0,
+      offer_notice_count: offerNoticeCount,
       tier2_count: tier2Count,
       tier3_count: tier3Count,
       previous_results_processed: previousResultsProcessed,
@@ -194,6 +207,7 @@ async function handler(req: NextRequest) {
   return NextResponse.json({
     batch_id: batch.id,
     email_count: requests.length,
+    offer_notice_count: offerNoticeCount,
     tier2_count: tier2Count,
     tier3_count: tier3Count,
     previous_results_processed: previousResultsProcessed,

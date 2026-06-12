@@ -954,6 +954,85 @@ export async function writeExtracted(
 }
 
 // ----------------------------------------------------------------
+// Offer-notice placeholder filter (free — no API call, runs between Stage 1 and Stage 2)
+// ----------------------------------------------------------------
+
+interface OfferNoticeResult {
+  isOffer:         boolean
+  placeholderName: string | null
+  optionRef:       string | null
+  destination:     string | null
+}
+
+// Subject starts with "X Options" — Amadeus offer-notice standard format.
+const OFFER_NOTICE_SUBJECT_START_RE = /^([A-Za-z][A-Za-z ]{1,30}?)\s+Options\b/i
+// "Offer Notice" or "Amadeus Offer" anywhere in subject or body.
+const OFFER_NOTICE_PHRASE_RE        = /offer\s+notice|amadeus\s+offer/i
+// "X Options" anywhere in text.
+const OFFER_NOTICE_NAME_RE          = /\b([A-Za-z][A-Za-z ]{1,30}?)\s+Options\b/i
+
+function extractAmadeusRef(text: string): string | null {
+  // 6-char uppercase alphanumeric option/PNR ref (e.g. "9IIYXY")
+  const match = /\b([A-Z0-9]{6})\b/.exec(text.toUpperCase())
+  return match?.[1] ?? null
+}
+
+export function isOfferNoticePlaceholder(email: {
+  subject: string
+  body:    string | null
+  snippet: string
+}): OfferNoticeResult {
+  const body     = email.body ?? email.snippet
+  const combined = email.subject + ' ' + body
+
+  // Rule 1: subject opens with "X Options" (Amadeus traveler-placeholder format)
+  const subjectMatch = OFFER_NOTICE_SUBJECT_START_RE.exec(email.subject.trim())
+  if (subjectMatch) {
+    const destination = subjectMatch[1].trim()
+    return {
+      isOffer:         true,
+      placeholderName: `${destination} Options`,
+      optionRef:       extractAmadeusRef(combined),
+      destination,
+    }
+  }
+
+  // Rule 2: "Offer Notice" / "Amadeus Offer" phrase in subject or body
+  if (OFFER_NOTICE_PHRASE_RE.test(email.subject) || OFFER_NOTICE_PHRASE_RE.test(body)) {
+    const nameMatch  = OFFER_NOTICE_NAME_RE.exec(body) ?? OFFER_NOTICE_NAME_RE.exec(email.subject)
+    const destination = nameMatch?.[1].trim() ?? null
+    return {
+      isOffer:         true,
+      placeholderName: destination ? `${destination} Options` : null,
+      optionRef:       extractAmadeusRef(combined),
+      destination,
+    }
+  }
+
+  return { isOffer: false, placeholderName: null, optionRef: null, destination: null }
+}
+
+export async function writeOfferNoticeEnquiry(
+  emailId: string,
+  subject: string,
+  result:  OfferNoticeResult,
+): Promise<void> {
+  await supabase.from('enquiries').insert({
+    client_id:          null,
+    client_name:        result.placeholderName,
+    amadeus_option_ref: result.optionRef,
+    destination:        result.destination,
+    status:             'sent',
+    notes:              `${subject} [auto-routed: offer notice, not extracted]`,
+  })
+  await supabase.from('inbox_emails').update({
+    category:          'offer_notice',
+    booking_extracted: true,
+  }).eq('id', emailId)
+  console.log(`[filter] offer_notice_skip ${emailId} name="${result.placeholderName ?? 'unknown'}" ref=${result.optionRef ?? 'none'}`)
+}
+
+// ----------------------------------------------------------------
 // Stage 1: free hard filter — no API call
 // ----------------------------------------------------------------
 
@@ -1062,6 +1141,13 @@ export async function processEmail(
   if (isStage1Noise(email.from_email, email.subject)) {
     console.log(`[filter] stage1_skip ${email.id}`)
     await markExtracted(email.id)
+    return 0
+  }
+
+  // Stage 1b — offer-notice placeholder filter (free — saves Haiku + Sonnet cost)
+  const offerResult = isOfferNoticePlaceholder(email)
+  if (offerResult.isOffer) {
+    await writeOfferNoticeEnquiry(email.id, email.subject, offerResult)
     return 0
   }
 
