@@ -713,9 +713,20 @@ export async function writeExtracted(
 
       try {
         if (action === 'cancel') {
-          if (Object.keys(matchOn).length) {
-            await supabase.from('air_bookings').update({ status: 'cancelled' }).match(matchOn)
+          let cq = supabase.from('air_bookings').update({ status: 'cancelled' }) as any
+          if (matchOn.ticket_number) {
+            cq = cq.eq('ticket_number', matchOn.ticket_number)
+          } else if (matchOn.pnr && matchOn.passenger_name) {
+            cq = cq.eq('pnr', matchOn.pnr).eq('passenger_name', matchOn.passenger_name)
+          } else if (matchOn.pnr) {
+            cq = cq.eq('pnr', matchOn.pnr)
+          } else {
+            console.log(`[write] air_bookings cancel — no usable match_on`, JSON.stringify(matchOn))
+            continue
           }
+          console.log(`[write] air_bookings cancel`, JSON.stringify(matchOn))
+          const { error: airCancelErr } = await cq
+          if (airCancelErr) console.error(`[write] air_bookings cancel error`, airCancelErr.message)
           continue
         }
 
@@ -761,11 +772,18 @@ export async function writeExtracted(
           continue
         }
 
-        // create — deduplicate by PNR then ticket_number (separate queries to avoid .or() issues with special chars)
+        // create — deduplicate by (pnr + passenger_name) composite, then ticket_number.
+        // Never use .maybeSingle() on pnr alone — multiple passengers share the same PNR.
         let existingId: string | null = null
-        if (fields.pnr) {
-          const { data } = await supabase.from('air_bookings').select('id').eq('pnr', fields.pnr).maybeSingle()
+        if (fields.pnr && fields.passenger_name) {
+          const { data } = await supabase.from('air_bookings').select('id')
+            .eq('pnr', fields.pnr)
+            .eq('passenger_name', fields.passenger_name)
+            .maybeSingle()
           existingId = data?.id ?? null
+        } else if (fields.pnr) {
+          const { data } = await supabase.from('air_bookings').select('id').eq('pnr', fields.pnr).limit(1)
+          existingId = data?.[0]?.id ?? null
         }
         if (!existingId && fields.ticket_number) {
           const { data } = await supabase.from('air_bookings').select('id').eq('ticket_number', fields.ticket_number).maybeSingle()
