@@ -342,10 +342,20 @@ function stripMeta(obj: Record<string, any>): Record<string, any> {
   return rest
 }
 
+/**
+ * Returns true if a section should run.
+ * activeSections = undefined → all sections run (GDS / untagged-but-processed paths).
+ * activeSections = Set        → only named sections run (tag-filtered path).
+ */
+function sec(name: string, activeSections: Set<string> | undefined): boolean {
+  return activeSections === undefined || activeSections.has(name)
+}
+
 export async function writeExtracted(
   parsed: Record<string, any>,
   emailId: string,
   inboxAddress: string,
+  activeSections?: Set<string>,
 ): Promise<number> {
   console.log(`[extract] ${emailId} parsed:`, JSON.stringify(parsed, null, 2))
 
@@ -355,7 +365,7 @@ export async function writeExtracted(
   let primaryPropId:   string | null = null
 
   // ---- bookings ----
-  if (parsed.bookings?.length) {
+  if (sec('bookings', activeSections) && parsed.bookings?.length) {
     for (const b of parsed.bookings) {
       const action  = (b.action ?? 'create') as string
       const matchOn: Record<string, any> = b.match_on ?? {}
@@ -474,7 +484,7 @@ export async function writeExtracted(
   }
 
   // ---- commissions ----
-  if (parsed.commissions?.length) {
+  if (sec('commissions', activeSections) && parsed.commissions?.length) {
     for (const c of parsed.commissions) {
       const action  = (c.action ?? 'create') as string
       const matchOn: Record<string, any> = c.match_on ?? {}
@@ -506,7 +516,7 @@ export async function writeExtracted(
   }
 
   // ---- clients ----
-  if (parsed.clients?.length) {
+  if (sec('clients', activeSections) && parsed.clients?.length) {
     for (const c of parsed.clients) {
       const action  = (c.action ?? 'create') as string
       const matchOn: Record<string, any> = c.match_on ?? {}
@@ -543,7 +553,7 @@ export async function writeExtracted(
   }
 
   // ---- client_preferences ----
-  if (parsed.client_preferences?.length) {
+  if (sec('client_preferences', activeSections) && parsed.client_preferences?.length) {
     for (const p of parsed.client_preferences) {
       const action  = (p.action ?? 'create') as string
       const matchOn: Record<string, any> = p.match_on ?? {}
@@ -571,7 +581,7 @@ export async function writeExtracted(
   }
 
   // ---- client_health_notes ----
-  if (parsed.client_health_notes?.length) {
+  if (sec('client_health_notes', activeSections) && parsed.client_health_notes?.length) {
     for (const h of parsed.client_health_notes) {
       const action  = (h.action ?? 'create') as string
       const matchOn: Record<string, any> = h.match_on ?? {}
@@ -599,7 +609,7 @@ export async function writeExtracted(
   }
 
   // ---- property_contacts ----
-  if (parsed.property_contacts?.length) {
+  if (sec('property_contacts', activeSections) && parsed.property_contacts?.length) {
     for (const pc of parsed.property_contacts) {
       const action  = (pc.action ?? 'create') as string
       const matchOn: Record<string, any> = pc.match_on ?? {}
@@ -641,7 +651,7 @@ export async function writeExtracted(
   }
 
   // ---- properties ----
-  if (parsed.properties?.length) {
+  if (sec('properties', activeSections) && parsed.properties?.length) {
     for (const p of parsed.properties) {
       const action  = (p.action ?? 'create') as string
       const matchOn: Record<string, any> = p.match_on ?? {}
@@ -673,7 +683,7 @@ export async function writeExtracted(
   }
 
   // ---- pre_stay_tasks ----
-  if (parsed.pre_stay_tasks?.length) {
+  if (sec('pre_stay_tasks', activeSections) && parsed.pre_stay_tasks?.length) {
     for (const t of parsed.pre_stay_tasks) {
       const action  = (t.action ?? 'create') as string
       const matchOn: Record<string, any> = t.match_on ?? {}
@@ -705,7 +715,7 @@ export async function writeExtracted(
   }
 
   // ---- air_bookings ----
-  if (parsed.air_bookings?.length) {
+  if (sec('air_bookings', activeSections) && parsed.air_bookings?.length) {
     for (const a of parsed.air_bookings) {
       const action  = (a.action ?? 'create') as string
       const matchOn: Record<string, any> = a.match_on ?? {}
@@ -823,7 +833,7 @@ export async function writeExtracted(
   }
 
   // ---- airport_vip_services ----
-  if (parsed.airport_vip_services?.length) {
+  if (sec('airport_vip_services', activeSections) && parsed.airport_vip_services?.length) {
     for (const s of parsed.airport_vip_services) {
       const action  = (s.action ?? 'create') as string
       const matchOn: Record<string, any> = s.match_on ?? {}
@@ -854,8 +864,8 @@ export async function writeExtracted(
     tablesWritten++
   }
 
-  // ---- enquiries (always insert — one thread may have multiple) ----
-  if (parsed.enquiries?.length) {
+  // ---- enquiries ----
+  if (sec('enquiries', activeSections) && parsed.enquiries?.length) {
     for (const e of parsed.enquiries) {
       const action  = (e.action ?? 'create') as string
       const matchOn: Record<string, any> = e.match_on ?? {}
@@ -880,7 +890,7 @@ export async function writeExtracted(
   }
 
   // ---- visa_tracking ----
-  if (parsed.visa_tracking?.length) {
+  if (sec('visa_tracking', activeSections) && parsed.visa_tracking?.length) {
     for (const v of parsed.visa_tracking) {
       const action  = (v.action ?? 'create') as string
       const matchOn: Record<string, any> = v.match_on ?? {}
