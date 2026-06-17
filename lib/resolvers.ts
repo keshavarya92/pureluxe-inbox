@@ -21,12 +21,17 @@ const TITLE_PREFIX_RE  = /^(mr\.?|mrs\.?|ms\.?|dr\.?|mstr\.?|miss|prof\.?)\s+/
 const FAMILY_SUFFIX_RE = /\s+(&|and)?\s*(family|\(party\)|group)\s*$/
 
 export function normalizeName(fullName: string): string {
-  return fullName
+  const result = fullName
     .toLowerCase()
     .replace(TITLE_PREFIX_RE,  '')
     .replace(FAMILY_SUFFIX_RE, '')
     .replace(/\s+/g, ' ')
     .trim()
+  // If stripping consumed the entire string (e.g. input was just "Mr." with
+  // no surname), fall back to the lowercased original rather than returning
+  // '' — an empty normalized_name would match every client with a null name
+  // and produce false dedup hits.
+  return result || fullName.toLowerCase().trim()
 }
 
 // ----------------------------------------------------------------
@@ -330,8 +335,47 @@ export async function resolveBooking(
     return { bookingId: data.id, action: 'inserted' }
   }
 
-  // No refs on either side — merge with first candidate (conservative fallback)
+  // No refs on either side — attempt conservative merge with first candidate,
+  // but guard against merging genuinely separate bookings.
   const fallback = candidates[0]
+
+  // Guard 1: num_rooms mismatch → clearly different rooms, insert new
+  if (incoming.num_rooms != null && fallback.num_rooms != null
+      && Number(incoming.num_rooms) !== Number(fallback.num_rooms)) {
+    const details = `num_rooms existing=${fallback.num_rooms} incoming=${incoming.num_rooms} booking_id=${fallback.id}`
+    console.log(`[resolver] booking_merge_skipped_inconsistent ${details}`)
+    const { data, error } = await supabase.from('bookings').insert(incoming).select('id').single()
+    if (error) throw new Error(`bookings insert (num_rooms mismatch): ${error.message}`)
+    console.log(`[resolver] bookings insert (num_rooms mismatch) id=${data.id}`)
+    return { bookingId: data.id, action: 'inserted' }
+  }
+
+  // Guard 2: total_cost differs by >10% → likely a different booking, insert new
+  if (incoming.total_cost != null && fallback.total_cost != null) {
+    const existingCost = Number(fallback.total_cost)
+    if (existingCost !== 0) {
+      const pctDiff = Math.abs(Number(incoming.total_cost) - existingCost) / existingCost
+      if (pctDiff > 0.10) {
+        const details = `total_cost existing=${fallback.total_cost} incoming=${incoming.total_cost} diff=${(pctDiff * 100).toFixed(1)}% booking_id=${fallback.id}`
+        console.log(`[resolver] booking_merge_skipped_inconsistent ${details}`)
+        const { data, error } = await supabase.from('bookings').insert(incoming).select('id').single()
+        if (error) throw new Error(`bookings insert (cost mismatch): ${error.message}`)
+        console.log(`[resolver] bookings insert (cost mismatch) id=${data.id}`)
+        return { bookingId: data.id, action: 'inserted' }
+      }
+    }
+  }
+
+  // Guards passed — proceed with merge
+  const incomingSummary = JSON.stringify({
+    hotel_name: incoming.hotel_name ?? null,
+    num_rooms:  incoming.num_rooms  ?? null,
+    total_cost: incoming.total_cost ?? null,
+    check_in:   incoming.check_in,
+    check_out:  incoming.check_out,
+  })
+  console.log(`[resolver] booking_merge_no_ref_fallback existing_id=${fallback.id} incoming=${incomingSummary}`)
+
   const patch = buildBookingPatch(fallback, incoming)
   if (Object.keys(patch).length) {
     await supabase.from('bookings')

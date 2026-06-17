@@ -1027,19 +1027,47 @@ export async function writeOfferNoticeEnquiry(
   subject: string,
   result:  OfferNoticeResult,
 ): Promise<void> {
-  await supabase.from('enquiries').insert({
-    client_id:          null,
-    client_name:        result.placeholderName,
-    amadeus_option_ref: result.optionRef,
-    destination:        result.destination,
-    status:             'sent',
-    notes:              `${subject} [auto-routed: offer notice, not extracted]`,
-  })
+  // Idempotency: skip the enquiry INSERT if we already have a row for this offer.
+  // Primary key: amadeus_option_ref (unique per offer).
+  // Fallback key: client_name + destination (when no ref was parseable).
+  let alreadyExists = false
+  if (result.optionRef) {
+    const { data: existing } = await supabase
+      .from('enquiries').select('id')
+      .eq('amadeus_option_ref', result.optionRef)
+      .limit(1)
+    if (existing?.length) {
+      console.log(`[filter] offer_notice_dup_skip ${emailId} existing_enquiry=${existing[0].id} ref=${result.optionRef}`)
+      alreadyExists = true
+    }
+  } else if (result.placeholderName && result.destination) {
+    const { data: existing } = await supabase
+      .from('enquiries').select('id')
+      .eq('client_name', result.placeholderName)
+      .eq('destination', result.destination)
+      .limit(1)
+    if (existing?.length) {
+      console.log(`[filter] offer_notice_dup_skip ${emailId} existing_enquiry=${existing[0].id} name="${result.placeholderName}"`)
+      alreadyExists = true
+    }
+  }
+
+  if (!alreadyExists) {
+    await supabase.from('enquiries').insert({
+      client_id:          null,
+      client_name:        result.placeholderName,
+      amadeus_option_ref: result.optionRef,
+      destination:        result.destination,
+      status:             'sent',
+      notes:              `${subject} [auto-routed: offer notice, not extracted]`,
+    })
+    console.log(`[filter] offer_notice_skip ${emailId} name="${result.placeholderName ?? 'unknown'}" ref=${result.optionRef ?? 'none'}`)
+  }
+
   await supabase.from('inbox_emails').update({
     category:          'offer_notice',
     booking_extracted: true,
   }).eq('id', emailId)
-  console.log(`[filter] offer_notice_skip ${emailId} name="${result.placeholderName ?? 'unknown'}" ref=${result.optionRef ?? 'none'}`)
 }
 
 // ----------------------------------------------------------------
