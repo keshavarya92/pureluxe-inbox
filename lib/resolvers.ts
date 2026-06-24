@@ -85,17 +85,18 @@ export interface ClientInput {
 
 // ----------------------------------------------------------------
 // Merge non-null incoming fields into an existing client row.
-// Only patches if something actually changed.
+// buildClientMergePatch is the pure computation, exported for scripts.
+// mergeClientFields applies the patch to the DB.
 // ----------------------------------------------------------------
 
-async function mergeClientFields(
-  existingId: string,
-  existing:   Record<string, any>,
-  incoming:   ClientInput,
-): Promise<void> {
+// Pure — no DB calls. Exported so scripts/dedup-clients.ts can reuse
+// the same merge logic without pulling in this module's supabase client.
+export function buildClientMergePatch(
+  existing: Record<string, any>,
+  incoming: ClientInput,
+): Record<string, any> {
   const patch: Record<string, any> = {}
 
-  // Scalar nullable fields: fill if existing row has null
   const fillableScalar = [
     'email', 'phone', 'whatsapp', 'title', 'first_name', 'last_name',
     'nationality', 'city_of_residence', 'company', 'birthday', 'anniversary', 'misc',
@@ -106,13 +107,11 @@ async function mergeClientFields(
     }
   }
 
-  // VIP level — keep the higher
   if (incoming.vip_level) {
     const merged = higherVip(existing.vip_level, incoming.vip_level)
     if (merged !== (existing.vip_level ?? 'standard')) patch.vip_level = merged
   }
 
-  // Loyalty programs — union by program+number
   if (incoming.loyalty_programs?.length) {
     const merged = mergeLoyaltyPrograms(existing.loyalty_programs ?? [], incoming.loyalty_programs)
     if (JSON.stringify(merged) !== JSON.stringify(existing.loyalty_programs ?? [])) {
@@ -120,7 +119,6 @@ async function mergeClientFields(
     }
   }
 
-  // Notes — append if new content isn't already a substring of existing
   for (const noteField of ['general_notes', 'internal_notes'] as const) {
     const incomingNote = incoming[noteField]
     if (incomingNote) {
@@ -131,6 +129,15 @@ async function mergeClientFields(
     }
   }
 
+  return patch
+}
+
+async function mergeClientFields(
+  existingId: string,
+  existing:   Record<string, any>,
+  incoming:   ClientInput,
+): Promise<void> {
+  const patch = buildClientMergePatch(existing, incoming)
   if (Object.keys(patch).length) {
     await supabase.from('clients').update(patch).eq('id', existingId)
     console.log(`[resolver] clients merge id=${existingId} fields=${Object.keys(patch).join(',')}`)
@@ -191,19 +198,44 @@ export async function resolveClient(incoming: ClientInput): Promise<string> {
     return canonical.id
   }
 
-  // Step 3: fuzzy trigram similarity match (requires pg_trgm + find_similar_clients RPC)
-  let fuzzyMatches: Array<{ id: string }> = []
+  // Step 3: fuzzy match runs BEFORE insert.
+  // ≥ 0.85 similarity → treat as same client, merge and return.
+  // 0.65–0.85 → flag for manual review after insert.
+  let fuzzyMatches: Array<{ id: string; sim: number }> = []
   try {
-    const { data } = await supabase.rpc('find_similar_clients', {
+    const { data, error: rpcErr } = await supabase.rpc('find_similar_clients', {
       input_name: normalized,
       threshold:  0.65,
     })
-    fuzzyMatches = data ?? []
-  } catch {
-    // pg_trgm RPC not yet installed — skip fuzzy check gracefully
+    if (rpcErr) console.warn(`[resolver] find_similar_clients RPC error (${rpcErr.code}): ${rpcErr.message}`)
+    else fuzzyMatches = data ?? []
+  } catch (rpcThrow: any) {
+    // pg_trgm or RPC not yet installed — skip fuzzy check gracefully
+    console.warn(`[resolver] find_similar_clients unavailable: ${rpcThrow?.message ?? rpcThrow}`)
   }
 
-  // Insert new client
+  // Step 3 auto-merge DISABLED: ≥0.85 fuzzy hits used to trigger an automatic
+  // client merge, but this produced silent false merges (two real people combined).
+  // All fuzzy candidates are now only flagged for manual review after insert.
+  // Re-enable only after client data is clean and the threshold has been validated
+  // against the actual name corpus.
+  //
+  // const highConfidence = fuzzyMatches.find(m => m.sim >= 0.85)
+  // if (highConfidence) {
+  //   const { data: existingRow, error: fetchErr } = await supabase
+  //     .from('clients').select('*').eq('id', highConfidence.id).maybeSingle()
+  //   if (existingRow) {
+  //     console.log(`[resolver] clients fuzzy high-confidence match "${normalized}" → id=${existingRow.id} sim=${highConfidence.sim.toFixed(2)}`)
+  //     await mergeClientFields(existingRow.id, existingRow, incoming)
+  //     return existingRow.id
+  //   }
+  //   console.warn(`[resolver] clients high-confidence fuzzy match id=${highConfidence.id} not found (${fetchErr?.message ?? 'no row'}) — continuing to upsert`)
+  // }
+
+  // Step 4: Atomic insert — ON CONFLICT (normalized_name) DO NOTHING.
+  // Requires migration 003 (unique constraint on normalized_name) to be active.
+  // Before migration 003: behaves as a plain insert (no race protection).
+  // After migration 003: conflict returns empty array; fall through to merge.
   const insertPayload: Record<string, any> = {
     full_name:         incoming.full_name,
     email:             incoming.email             ?? null,
@@ -224,25 +256,39 @@ export async function resolveClient(incoming: ClientInput): Promise<string> {
     misc:              incoming.misc              ?? null,
   }
 
-  const { data: newClient, error } = await supabase
-    .from('clients').insert(insertPayload).select('id').single()
-  if (error) throw new Error(`clients insert: ${error.message}`)
+  const { data: inserted } = await supabase
+    .from('clients')
+    .upsert(insertPayload, { onConflict: 'normalized_name', ignoreDuplicates: true })
+    .select('id')
 
-  console.log(`[resolver] clients insert id=${newClient.id} name="${incoming.full_name}"`)
+  if (inserted?.length) {
+    const newId = inserted[0].id
+    console.log(`[resolver] clients insert id=${newId} name="${incoming.full_name}"`)
 
-  // Flag fuzzy candidates for manual review — don't auto-merge, just surface
-  if (fuzzyMatches.length) {
-    console.log(`[resolver] clients fuzzy candidates for "${normalized}": ${fuzzyMatches.map(m => m.id).join(', ')}`)
-    for (const match of fuzzyMatches) {
-      await supabase.from('client_dedup_flags').insert({
-        client_id_a: newClient.id,
-        client_id_b: match.id,
-        reason:      'fuzzy_match_candidate',
-      })
+    // Flag all fuzzy candidates for manual review (auto-merge disabled — see Step 3 comment above)
+    if (fuzzyMatches.length) {
+      console.log(`[resolver] clients fuzzy candidates for "${normalized}": ${fuzzyMatches.map(m => `${m.id}(${m.sim.toFixed(2)})`).join(', ')}`)
+      for (const match of fuzzyMatches) {
+        await supabase.from('client_dedup_flags').insert({
+          client_id_a: newId,
+          client_id_b: match.id,
+          reason:      'fuzzy_match_candidate',
+        })
+      }
     }
+    return newId
   }
 
-  return newClient.id
+  // Conflict: a concurrent insert already created this normalized_name.
+  // Fetch the winning row and merge our fields into it.
+  const { data: conflictRow, error: conflictErr } = await supabase
+    .from('clients').select('*').eq('normalized_name', normalized).single()
+  if (conflictErr || !conflictRow) {
+    throw new Error(`clients conflict fetch failed for "${normalized}": ${conflictErr?.message ?? 'no row found'}`)
+  }
+  console.log(`[resolver] clients conflict resolved — merged into id=${conflictRow.id}`)
+  await mergeClientFields(conflictRow.id, conflictRow, incoming)
+  return conflictRow.id
 }
 
 // ----------------------------------------------------------------
@@ -266,14 +312,129 @@ export interface BookingInput {
 }
 
 // ----------------------------------------------------------------
+// flagThreadClientConflict
+// After inserting a booking, checks whether the same thread already has
+// other bookings for the same (check_in, check_out) with a different client_id.
+// If so, writes a row to booking_conflict_flags (queryable warning log).
+// These are likely false splits from resolveClient name ambiguity.
+// ----------------------------------------------------------------
+
+async function flagThreadClientConflict(
+  threadId:     string,
+  clientId:     string,
+  checkIn:      string,
+  checkOut:     string,
+  newBookingId: string,
+): Promise<void> {
+  const { data: conflicts } = await supabase
+    .from('bookings')
+    .select('id, client_id')
+    .eq('source_thread_id', threadId)
+    .eq('check_in',         checkIn)
+    .eq('check_out',        checkOut)
+    .neq('client_id',       clientId)
+    .neq('id',              newBookingId)
+
+  if (!conflicts?.length) return
+
+  const conflictingIds = conflicts.map((c: any) => c.id)
+  console.warn(
+    `[resolver] booking_conflict thread=${threadId} new_booking=${newBookingId} ` +
+    `new_client=${clientId} conflicts_with=${conflictingIds.join(',')} — logged to booking_conflict_flags`,
+  )
+  const { error } = await supabase.from('booking_conflict_flags').insert({
+    thread_id:       threadId,
+    new_booking_id:  newBookingId,
+    new_client_id:   clientId,
+    conflicting_ids: conflictingIds,
+    check_in:        checkIn,
+    check_out:       checkOut,
+    reason:          'same_thread_same_dates_different_client',
+  })
+  if (error) console.error('[resolver] booking_conflict_flags insert error:', error.message)
+}
+
+// ----------------------------------------------------------------
 // resolveBooking
 // Returns { bookingId, action } — existing row merged or new row inserted.
+// Primary path (extraction pipeline): thread-scoped dedup via source_thread_id.
+// Legacy path (manual entries): ref-based matching (no source_thread_id).
 // ----------------------------------------------------------------
 
 export async function resolveBooking(
   incoming: BookingInput,
 ): Promise<{ bookingId: string; action: 'inserted' | 'updated' }> {
-  const { client_id, property_id, check_in, check_out } = incoming
+  const { client_id, property_id, check_in, check_out, source_thread_id } = incoming
+
+  // ── Thread-first path ────────────────────────────────────────────────────
+  // Extraction pipeline always sets source_thread_id. Look for a prior booking
+  // from the same thread + client + stay before falling back to ref matching.
+  if (source_thread_id && client_id) {
+    const { data: threadMatch } = await supabase
+      .from('bookings')
+      .select('*')
+      .eq('source_thread_id', source_thread_id)
+      .eq('client_id',        client_id)
+      .eq('check_in',         check_in)
+      .eq('check_out',        check_out)
+      .maybeSingle()
+
+    if (threadMatch) {
+      const patch = buildBookingPatch(threadMatch, incoming)
+      if (Object.keys(patch).length) {
+        await supabase
+          .from('bookings')
+          .update({ ...patch, updated_at: new Date().toISOString() })
+          .eq('id', threadMatch.id)
+        console.log(`[resolver] bookings thread-match merge id=${threadMatch.id} fields=${Object.keys(patch).join(',')}`)
+      }
+      return { bookingId: threadMatch.id, action: 'updated' }
+    }
+
+    // No prior booking for this thread+client+stay — insert.
+    const { data: inserted, error: insertErr } = await supabase
+      .from('bookings')
+      .insert(incoming)
+      .select('id')
+      .single()
+
+    if (insertErr) {
+      // Unique constraint race (23505): a concurrent insert won. Fetch and merge.
+      if (insertErr.code === '23505') {
+        const { data: conflictRow } = await supabase
+          .from('bookings')
+          .select('*')
+          .eq('source_thread_id', source_thread_id)
+          .eq('client_id',        client_id)
+          .eq('check_in',         check_in)
+          .eq('check_out',        check_out)
+          .maybeSingle()
+        if (conflictRow) {
+          const patch = buildBookingPatch(conflictRow, incoming)
+          if (Object.keys(patch).length) {
+            await supabase
+              .from('bookings')
+              .update({ ...patch, updated_at: new Date().toISOString() })
+              .eq('id', conflictRow.id)
+          }
+          console.log(`[resolver] bookings thread-constraint race resolved id=${conflictRow.id}`)
+          return { bookingId: conflictRow.id, action: 'updated' }
+        }
+      }
+      throw new Error(`bookings insert: ${insertErr.message}`)
+    }
+
+    const newId = inserted.id
+    console.log(`[resolver] bookings insert id=${newId} (thread-keyed)`)
+
+    // Detect same-thread / same-dates / different-client_id — potential false split.
+    await flagThreadClientConflict(source_thread_id, client_id, check_in, check_out, newId)
+
+    return { bookingId: newId, action: 'inserted' }
+  }
+
+  // ── Legacy path ──────────────────────────────────────────────────────────
+  // No source_thread_id (manual entries, legacy imports). Use ref-based matching.
 
   // Collect non-null ref fields from incoming
   const incomingRefs: Record<string, string> = {}
@@ -282,7 +443,7 @@ export async function resolveBooking(
   }
   const incomingHasRefs = Object.keys(incomingRefs).length > 0
 
-  // Step 1: query by (client_id, property_id, check_in, check_out)
+  // Query by (client_id, property_id, check_in, check_out)
   let q = supabase
     .from('bookings').select('*')
     .eq('client_id', client_id)
@@ -292,14 +453,13 @@ export async function resolveBooking(
   const { data: candidates } = await q
 
   if (!candidates?.length) {
-    // No match — insert new booking
     const { data, error } = await supabase.from('bookings').insert(incoming).select('id').single()
     if (error) throw new Error(`bookings insert: ${error.message}`)
     console.log(`[resolver] bookings insert id=${data.id}`)
     return { bookingId: data.id, action: 'inserted' }
   }
 
-  // Step 2: find which candidate shares at least one ref (or both sides have no refs)
+  // Find which candidate shares at least one ref (or both sides have no refs)
   let matched: Record<string, any> | null = null
 
   for (const row of candidates) {
@@ -316,7 +476,6 @@ export async function resolveBooking(
   }
 
   if (matched) {
-    // Same booking re-ingested — merge non-null fields
     const patch = buildBookingPatch(matched, incoming)
     if (Object.keys(patch).length) {
       await supabase.from('bookings')
@@ -327,7 +486,7 @@ export async function resolveBooking(
     return { bookingId: matched.id, action: 'updated' }
   }
 
-  // No ref overlap AND incoming has refs → genuinely separate booking (different room/confirmation)
+  // No ref overlap AND incoming has refs → separate booking (different room/confirmation)
   if (incomingHasRefs) {
     const { data, error } = await supabase.from('bookings').insert(incoming).select('id').single()
     if (error) throw new Error(`bookings insert (separate room): ${error.message}`)
@@ -335,11 +494,10 @@ export async function resolveBooking(
     return { bookingId: data.id, action: 'inserted' }
   }
 
-  // No refs on either side — attempt conservative merge with first candidate,
-  // but guard against merging genuinely separate bookings.
+  // No refs on either side — conservative merge with guards
   const fallback = candidates[0]
 
-  // Guard 1: num_rooms mismatch → clearly different rooms, insert new
+  // Guard 1: num_rooms mismatch → insert new
   if (incoming.num_rooms != null && fallback.num_rooms != null
       && Number(incoming.num_rooms) !== Number(fallback.num_rooms)) {
     const details = `num_rooms existing=${fallback.num_rooms} incoming=${incoming.num_rooms} booking_id=${fallback.id}`
@@ -350,7 +508,7 @@ export async function resolveBooking(
     return { bookingId: data.id, action: 'inserted' }
   }
 
-  // Guard 2: total_cost differs by >10% → likely a different booking, insert new
+  // Guard 2: total_cost differs by >10% → insert new
   if (incoming.total_cost != null && fallback.total_cost != null) {
     const existingCost = Number(fallback.total_cost)
     if (existingCost !== 0) {
@@ -366,7 +524,7 @@ export async function resolveBooking(
     }
   }
 
-  // Guards passed — proceed with merge
+  // Guards passed — merge
   const incomingSummary = JSON.stringify({
     hotel_name: incoming.hotel_name ?? null,
     num_rooms:  incoming.num_rooms  ?? null,

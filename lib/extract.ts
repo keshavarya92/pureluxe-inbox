@@ -8,10 +8,33 @@ import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from './supabase'
 import { getGmailClient } from './gmail'
 import { fetchAttachments, extractTextFromAttachment, type Attachment } from './attachments'
+import { resolveClient, resolveBooking, type ClientInput, type BookingInput } from './resolvers'
 
 if (!process.env.ANTHROPIC_API_KEY) {
   throw new Error('Missing ANTHROPIC_API_KEY environment variable')
 }
+
+// ----------------------------------------------------------------
+// KFT team exclusion lists — used by guest name extractor
+// ----------------------------------------------------------------
+
+const KFT_TEAM_EMAILS = [
+  'keshav@kft.travel', 'sanjay@kft.travel', 'shilpa@kft.travel',
+  'sonali@kft.travel', 'operations@kft.travel', 'holidays@kft.travel',
+  'tours@kft.travel', 'international@kft.travel', 'bindu@kft.travel',
+  'vacations@kft.travel', 'atul@kft.travel',
+]
+
+const KFT_TEAM_NAMES = [
+  'keshav', 'sanjay', 'shilpa', 'sonali', 'shreya', 'priya',
+  'suchita', 'ria', 'shraddha', 'sudarshan', 'atul', 'bindu',
+  'sonali shah', 'shreya agarwal', 'ria shah', 'suchita jain',
+]
+
+// Hotel staff patterns to exclude — generic roles
+const STAFF_ROLE_PATTERNS = [
+  /\b(manager|director|coordinator|concierge|reservations|sales|front\s*desk|receptionist)\b/i,
+]
 
 const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -22,13 +45,78 @@ const client = new Anthropic({
 // Relationship resolution
 // ----------------------------------------------------------------
 
-export async function resolveClient(name: string): Promise<string> {
-  const { data } = await supabase.from('clients').select('id').ilike('full_name', name).maybeSingle()
-  if (data) return data.id
-  const { data: created, error } = await supabase
-    .from('clients').insert({ full_name: name }).select('id').single()
-  if (error) throw new Error(`clients insert: ${error.message}`)
-  return created.id
+// resolveClient and resolveBooking are imported from lib/resolvers.ts.
+// These helpers map raw LLM output fields to the typed resolver interfaces.
+
+function buildClientInput(fields: Record<string, any>): ClientInput {
+  return {
+    full_name:         String(fields.full_name ?? ''),
+    email:             fields.email             ?? null,
+    phone:             fields.phone             ?? null,
+    whatsapp:          fields.whatsapp          ?? null,
+    title:             fields.title             ?? null,
+    first_name:        fields.first_name        ?? null,
+    last_name:         fields.last_name         ?? null,
+    nationality:       fields.nationality       ?? null,
+    city_of_residence: fields.city_of_residence ?? null,
+    vip_level:         fields.vip_level         ?? null,
+    company:           fields.company           ?? null,
+    loyalty_programs:  Array.isArray(fields.loyalty_programs) ? fields.loyalty_programs : null,
+    birthday:          fields.birthday          ?? null,
+    anniversary:       fields.anniversary       ?? null,
+    general_notes:     fields.general_notes     ?? null,
+    internal_notes:    fields.internal_notes    ?? null,
+    misc:              fields.misc              ?? null,
+  }
+}
+
+function buildBookingInput(
+  fields:       Record<string, any>,
+  clientId:     string,
+  propId:       string | null,
+  emailId:      string,
+  inboxAddress: string,
+  bookedBy:     string | null,
+  threadId:     string,
+): BookingInput {
+  return {
+    client_id:             clientId,
+    check_in:              fields.check_in  ?? '',
+    check_out:             fields.check_out ?? '',
+    property_id:           propId,
+    hotel_ref:             fields.hotel_ref   ?? null,
+    amadeus_ref:           fields.amadeus_ref ?? null,
+    lhw_ref:               fields.lhw_ref     ?? null,
+    ottila_ref:            fields.ottila_ref  ?? null,
+    onyx_ref:              fields.onyx_ref    ?? null,
+    email_id:              emailId,
+    source_thread_id:      threadId || null,
+    client_name:           fields.client_name           ?? null,
+    hotel_name:            fields.hotel_name            ?? null,
+    city:                  fields.city                  ?? null,
+    country:               fields.country               ?? null,
+    chain:                 fields.chain                 ?? null,
+    booked_by:             bookedBy,
+    booked_by_name:        inboxAddress                 || null,
+    num_rooms:             fields.num_rooms             ?? null,
+    num_adults:            fields.num_adults            ?? null,
+    total_cost:            fields.total_cost            ?? null,
+    currency:              fields.currency              ?? null,
+    commission_rate:       fields.commission_rate       ?? null,
+    commission_expected:   fields.commission_expected   ?? null,
+    commission_channel:    fields.commission_channel    ?? null,
+    commissionable:        fields.commissionable        ?? null,
+    booking_source:        fields.booking_source        ?? null,
+    booking_channel:       fields.booking_channel       ?? null,
+    status:                fields.status                ?? null,
+    cancellation_deadline: fields.cancellation_deadline ?? null,
+    cancellation_policy:   fields.cancellation_policy   ?? null,
+    special_occasion:      fields.special_occasion      ?? null,
+    vip_flag:              fields.vip_flag              ?? false,
+    group_name:            fields.group_name            ?? null,
+    notes:                 fields.notes                 ?? null,
+    misc:                  fields.misc                  ?? null,
+  }
 }
 
 export async function resolveProperty(
@@ -351,18 +439,184 @@ function sec(name: string, activeSections: Set<string> | undefined): boolean {
   return activeSections === undefined || activeSections.has(name)
 }
 
+// ----------------------------------------------------------------
+// Guest name extractor — finds additional traveller names in the
+// email body and resolves them as client records.
+// ----------------------------------------------------------------
+
+async function extractAndResolveGuests(
+  emailBody: string,
+  leadClientId: string,
+): Promise<string[]> {
+  const guestIds = new Set<string>()
+
+  const patterns = [
+    // "Mr/Mrs/Ms/Dr/Prof Firstname Lastname [Lastname2]" — single line only
+    /\b(?:Mr\.?|Mrs\.?|Ms\.?|Miss|Dr\.?|Prof\.?)[^\S\n]+([A-Z][a-z]+(?:[^\S\n]+[A-Z][a-z]+){1,3})/g,
+    // "Firstname Lastname & Firstname Lastname" — both names must be on the same line
+    /\b([A-Z][a-z]+(?:[^\S\n]+[A-Z][a-z]+){1,2})[^\S\n]*&[^\S\n]*([A-Z][a-z]+(?:[^\S\n]+[A-Z][a-z]+){1,2})/g,
+  ]
+
+  const candidateNames: string[] = []
+  for (const pattern of patterns) {
+    let match: RegExpExecArray | null
+    pattern.lastIndex = 0
+    while ((match = pattern.exec(emailBody)) !== null) {
+      for (let i = 1; i < match.length; i++) {
+        if (match[i]) candidateNames.push(match[i].trim())
+      }
+    }
+  }
+
+  const uniqueNames = [...new Set(candidateNames)]
+
+  for (const name of uniqueNames) {
+    const nameLower = name.toLowerCase()
+
+    // Skip KFT team members
+    if (KFT_TEAM_NAMES.some(n => nameLower.includes(n))) continue
+
+    // Skip single-word names
+    if (name.split(/\s+/).length < 2) continue
+
+    // Skip hotel staff role names
+    if (STAFF_ROLE_PATTERNS.some(p => p.test(name))) continue
+
+    try {
+      const clientId = await resolveClient({ full_name: name })
+      if (clientId !== leadClientId) guestIds.add(clientId)
+    } catch (err) {
+      console.warn(`[extract] guest resolve failed for "${name}":`, err)
+    }
+  }
+
+  return [...guestIds]
+}
+
 export async function writeExtracted(
-  parsed: Record<string, any>,
-  emailId: string,
-  inboxAddress: string,
+  parsed:          Record<string, any>,
+  emailId:         string,
+  inboxAddress:    string,
+  threadId:        string,
   activeSections?: Set<string>,
+  emailBody?:      string | null,
 ): Promise<number> {
+  if (!threadId) {
+    console.error(`[extract] writeExtracted called without threadId for email ${emailId} — bookings will lack source_thread_id, dedup constraint inactive`)
+  }
   console.log(`[extract] ${emailId} parsed:`, JSON.stringify(parsed, null, 2))
 
-  let tablesWritten    = 0
-  let bookingId:       string | null = null
+  let tablesWritten = 0
+  let primaryPropId: string | null = null
+
+  // ---- Pre-flight: resolve primary client (must complete before any section write) ----
+  // Resolvers run regardless of activeSections — client_id / booking_id are foreign keys
+  // needed even when only a subset of sections is active.
   let primaryClientId: string | null = null
-  let primaryPropId:   string | null = null
+  const firstClientRec     = parsed.clients?.find((c: any) => (c.action ?? 'create') !== 'cancel') as Record<string, any> | undefined
+  const firstCreateBooking = parsed.bookings?.find((b: any) => (b.action ?? 'create') === 'create') as Record<string, any> | undefined
+  {
+    const bSrc = firstCreateBooking ? stripMeta(firstCreateBooking) : null
+    const clientSrc: Record<string, any> | null = firstClientRec
+      ? stripMeta(firstClientRec)
+      : bSrc?.client_name
+        ? { full_name: bSrc.client_name }
+        : null
+    if (clientSrc?.full_name) {
+      try {
+        primaryClientId = await resolveClient(buildClientInput(clientSrc))
+      } catch (err) {
+        console.error(`[extract] resolveClient failed ${emailId}:`, err)
+        return 0
+      }
+    }
+  }
+
+  // ---- Pre-flight: resolve primary booking (after client, before booking-dependent sections) ----
+  let bookingId: string | null = null
+  if (firstCreateBooking && primaryClientId) {
+    const bFields = stripMeta(firstCreateBooking)
+    if (bFields.check_in && bFields.check_out) {
+      const bHasRef = !!(bFields.hotel_ref || bFields.amadeus_ref || bFields.lhw_ref || bFields.ottila_ref || bFields.onyx_ref)
+      if (!bHasRef) {
+        console.log(`[extract] booking has no ref — routed to enquiries instead of bookings`)
+        const destination = [bFields.city, bFields.country].filter(Boolean).join(', ') || null
+        const prefEnqPayload = {
+          email_id:        emailId,
+          client_id:       primaryClientId,
+          client_name:     bFields.client_name   ?? null,
+          property_name:   bFields.hotel_name    ?? null,
+          destination,
+          check_in:        bFields.check_in      ?? null,
+          check_out:       bFields.check_out     ?? null,
+          num_rooms:       bFields.num_rooms     ?? null,
+          num_adults:      bFields.num_adults    ?? null,
+          quoted_rate:     bFields.total_cost    ?? null,
+          quoted_currency: bFields.currency      ?? null,
+          notes:           bFields.notes         ?? null,
+          misc:            bFields.misc          ?? null,
+        }
+        const { error: prefEnqErr } = await supabase.from('enquiries').insert(prefEnqPayload)
+        if (prefEnqErr) console.error('[write] enquiries (routed from booking, no ref) insert error:', prefEnqErr.message, JSON.stringify(prefEnqPayload))
+      } else {
+        const propId = bFields.hotel_name
+          ? await resolveProperty(bFields.hotel_name, bFields.city ?? null, bFields.country ?? null, bFields.chain ?? null).catch(() => null)
+          : null
+        primaryPropId = propId
+        const bookedBy = await resolveBookedBy(inboxAddress)
+        try {
+          const resolved = await resolveBooking(buildBookingInput(bFields, primaryClientId, propId, emailId, inboxAddress, bookedBy, threadId))
+          bookingId = resolved.bookingId
+          console.log(`[extract] resolved client_id=${primaryClientId} booking_id=${bookingId} action=${resolved.action}`)
+          if (resolved.action === 'inserted' && !parsed.commissions?.length
+              && (bFields.commission_rate || bFields.commission_expected)) {
+            try {
+              const { error: autoCommPreflightErr } = await supabase.from('commissions').insert({
+                booking_id:      bookingId,
+                amount_expected: bFields.commission_expected ?? null,
+                currency:        bFields.currency           ?? null,
+                channel:         bFields.commission_channel ?? null,
+                status:          'pending',
+              })
+              if (autoCommPreflightErr) console.error('[write] commissions auto-insert (pre-flight) error:', autoCommPreflightErr.message)
+              else console.log(`[write] commissions auto-insert booking_id=${bookingId}`)
+            } catch (e) {
+              console.error('Auto-commission (pre-flight) failed:', e)
+            }
+          }
+        } catch (err) {
+          console.error(`[extract] resolveBooking failed ${emailId}:`, err)
+          return 0
+        }
+      }
+    }
+  }
+
+  // ---- guest name extraction (non-blocking) ----
+  if (bookingId && primaryClientId && emailBody) {
+    try {
+      const guestIds = await extractAndResolveGuests(emailBody, primaryClientId)
+      if (guestIds.length > 0) {
+        const { data: existing } = await supabase
+          .from('bookings')
+          .select('additional_guest_ids')
+          .eq('id', bookingId)
+          .single()
+        const currentIds: string[] = existing?.additional_guest_ids ?? []
+        const merged = [...new Set([...currentIds, ...guestIds])]
+        if (merged.length > currentIds.length) {
+          const { error: guestUpdateErr } = await supabase
+            .from('bookings')
+            .update({ additional_guest_ids: merged })
+            .eq('id', bookingId)
+          if (guestUpdateErr) console.error('[extract] additional_guest_ids update error:', guestUpdateErr.message)
+          else console.log(`[extract] booking ${bookingId} — added ${merged.length - currentIds.length} guest(s): ${guestIds.join(', ')}`)
+        }
+      }
+    } catch (err) {
+      console.warn(`[extract] guest extraction failed for booking ${bookingId}:`, err)
+    }
+  }
 
   // ---- bookings ----
   if (sec('bookings', activeSections) && parsed.bookings?.length) {
@@ -389,13 +643,14 @@ export async function writeExtracted(
         if (action === 'update') {
           if (!Object.keys(matchOn).length) continue
           const [clientId, propertyId] = await Promise.all([
-            fields.client_name ? resolveClient(fields.client_name).catch(() => null) : Promise.resolve(null),
+            fields.client_name ? resolveClient({ full_name: fields.client_name }).catch(() => null) : Promise.resolve(null),
             fields.hotel_name  ? resolveProperty(fields.hotel_name, fields.city ?? null, fields.country ?? null, fields.chain ?? null).catch(() => null) : Promise.resolve(null),
           ])
           const updatePayload: Record<string, unknown> = { ...fields }
           if (clientId   !== null) updatePayload.client_id   = clientId
           if (propertyId !== null) updatePayload.property_id = propertyId
-          await supabase.from('bookings').update(updatePayload).match(matchOn)
+          const { error: bookingUpdateErr } = await supabase.from('bookings').update(updatePayload).match(matchOn)
+          if (bookingUpdateErr) console.error('[write] bookings update error:', bookingUpdateErr.message, JSON.stringify(matchOn))
           if (!bookingId) {
             const { data: found } = await supabase.from('bookings').select('id').match(matchOn).maybeSingle()
             if (found) bookingId = found.id
@@ -403,77 +658,69 @@ export async function writeExtracted(
           continue
         }
 
-        // action === 'create'
-        const [clientId, propertyId, bookedBy] = await Promise.all([
-          fields.client_name ? resolveClient(fields.client_name).catch(() => null) : Promise.resolve(null),
-          fields.hotel_name  ? resolveProperty(fields.hotel_name, fields.city ?? null, fields.country ?? null, fields.chain ?? null).catch(() => null) : Promise.resolve(null),
-          resolveBookedBy(inboxAddress),
-        ])
-        if (!primaryClientId) primaryClientId = clientId
-        if (!primaryPropId)   primaryPropId   = propertyId
-
-        // Dedup by hotel_ref only — amadeus_ref is trip-level and shared across
-        // all hotels in an itinerary, so it would cause multi-hotel itineraries
-        // to overwrite the same row instead of creating separate booking records.
-        let existingId: string | null = null
-        if (fields.hotel_ref) {
-          const { data } = await supabase.from('bookings').select('id').eq('hotel_ref', fields.hotel_ref).maybeSingle()
-          existingId = data?.id ?? null
-        }
-
-        const payload = {
-          email_id:              emailId,
-          client_id:             clientId,
-          client_name:           fields.client_name           ?? null,
-          property_id:           propertyId,
-          hotel_name:            fields.hotel_name            ?? null,
-          city:                  fields.city                  ?? null,
-          country:               fields.country               ?? null,
-          chain:                 fields.chain                 ?? null,
-          booked_by:             bookedBy,
-          booked_by_name:        inboxAddress                 || null,
-          check_in:              fields.check_in              ?? null,
-          check_out:             fields.check_out             ?? null,
-          num_rooms:             fields.num_rooms             ?? null,
-          num_adults:            fields.num_adults            ?? null,
-          total_cost:            fields.total_cost            ?? null,
-          currency:              fields.currency              ?? null,
-          commission_rate:       fields.commission_rate       ?? null,
-          commission_expected:   fields.commission_expected   ?? null,
-          commission_channel:    fields.commission_channel    ?? null,
-          hotel_ref:             fields.hotel_ref             ?? null,
-          amadeus_ref:           fields.amadeus_ref           ?? null,
-          lhw_ref:               fields.lhw_ref               ?? null,
-          onyx_ref:              fields.onyx_ref              ?? null,
-          booking_source:        fields.booking_source        ?? null,
-          status:                fields.status                ?? null,
-          cancellation_deadline: fields.cancellation_deadline ?? null,
-          cancellation_policy:   fields.cancellation_policy   ?? null,
-          special_occasion:      fields.special_occasion      ?? null,
-          vip_flag:              fields.vip_flag              ?? false,
-          group_name:            fields.group_name            ?? null,
-          notes:                 fields.notes                 ?? null,
-          misc:                  fields.misc                  ?? null,
-        }
-
-        if (existingId) {
-          console.log(`[write] bookings update id=${existingId}`, JSON.stringify(payload))
-          await supabase.from('bookings').update(payload).eq('id', existingId)
-          if (!bookingId) bookingId = existingId
+        // create — resolved by pre-flight resolveBooking for the primary booking.
+        // For additional bookings in multi-hotel itineraries, resolve here.
+        if (b === firstCreateBooking && bookingId) {
+          // Primary booking already resolved in pre-flight; bookingId is captured.
         } else {
-          console.log(`[write] bookings insert`, JSON.stringify(payload))
-          const { data, error } = await supabase.from('bookings').insert(payload).select('id').single()
-          if (error) throw new Error(`bookings insert: ${error.message}`)
-          if (!bookingId) bookingId = data?.id ?? null
+          const propId = fields.hotel_name
+            ? await resolveProperty(fields.hotel_name, fields.city ?? null, fields.country ?? null, fields.chain ?? null).catch(() => null)
+            : null
+          if (!primaryPropId) primaryPropId = propId
 
-          if (data?.id && !parsed.commissions?.length && (fields.commission_rate || fields.commission_expected)) {
-            try {
-              const autoComm = { booking_id: data.id, amount_expected: fields.commission_expected ?? null, currency: fields.currency ?? null, channel: fields.commission_channel ?? null, status: 'pending' }
-              console.log(`[write] commissions auto-insert`, JSON.stringify(autoComm))
-              await supabase.from('commissions').insert(autoComm)
-            } catch (err) {
-              console.error('Auto-commission insert failed:', err)
+          let bClientId = primaryClientId
+          if (!bClientId && fields.client_name) {
+            bClientId = await resolveClient({ full_name: fields.client_name }).catch(() => null)
+          }
+          if (!bClientId || !fields.check_in || !fields.check_out) {
+            console.log(`[write] bookings create — missing client_id or dates, skipping`)
+            continue
+          }
+
+          const addlHasRef = !!(fields.hotel_ref || fields.amadeus_ref || fields.lhw_ref || fields.ottila_ref || fields.onyx_ref)
+          if (!addlHasRef) {
+            console.log(`[extract] booking has no ref — routed to enquiries instead of bookings`)
+            const destination = [fields.city, fields.country].filter(Boolean).join(', ') || null
+            const addlEnqPayload = {
+              email_id:        emailId,
+              client_id:       bClientId,
+              client_name:     fields.client_name   ?? null,
+              property_name:   fields.hotel_name    ?? null,
+              destination,
+              check_in:        fields.check_in      ?? null,
+              check_out:       fields.check_out     ?? null,
+              num_rooms:       fields.num_rooms     ?? null,
+              num_adults:      fields.num_adults    ?? null,
+              quoted_rate:     fields.total_cost    ?? null,
+              quoted_currency: fields.currency      ?? null,
+              notes:           fields.notes         ?? null,
+              misc:            fields.misc          ?? null,
             }
+            const { error: addlEnqErr } = await supabase.from('enquiries').insert(addlEnqPayload)
+            if (addlEnqErr) console.error('[write] enquiries (routed from additional booking, no ref) insert error:', addlEnqErr.message, JSON.stringify(addlEnqPayload))
+            continue
+          }
+
+          const bookedBy    = await resolveBookedBy(inboxAddress)
+          const addlResolved = await resolveBooking(buildBookingInput(fields, bClientId, propId, emailId, inboxAddress, bookedBy, threadId))
+          if (!bookingId) bookingId = addlResolved.bookingId
+          console.log(`[write] bookings additional booking_id=${addlResolved.bookingId} action=${addlResolved.action}`)
+
+          if (addlResolved.action === 'inserted' && !parsed.commissions?.length
+              && (fields.commission_rate || fields.commission_expected)) {
+            try {
+            const { error: autoCommAddlErr } = await supabase.from('commissions').insert({
+              booking_id:      addlResolved.bookingId,
+              amount_expected: fields.commission_expected ?? null,
+              currency:        fields.currency           ?? null,
+              channel:         fields.commission_channel ?? null,
+              status:          'pending',
+            })
+            if (autoCommAddlErr) console.error('[write] commissions auto-insert (additional) error:', autoCommAddlErr.message)
+            else console.log(`[write] commissions auto-insert booking_id=${addlResolved.bookingId}`)
+          } catch (e) {
+            console.error('Auto-commission (additional) failed:', e)
+          }
           }
         }
       } catch (err) {
@@ -493,21 +740,24 @@ export async function writeExtracted(
       try {
         if (action === 'cancel') {
           if (Object.keys(matchOn).length) {
-            await supabase.from('commissions').update({ status: 'disputed' }).match(matchOn)
+            const { error: commCancelErr } = await supabase.from('commissions').update({ status: 'disputed' }).match(matchOn)
+            if (commCancelErr) console.error('[write] commissions cancel error:', commCancelErr.message, JSON.stringify(matchOn))
           }
           continue
         }
 
         if (action === 'update') {
           if (Object.keys(matchOn).length) {
-            await supabase.from('commissions').update(fields).match(matchOn)
+            const { error: commUpdateErr } = await supabase.from('commissions').update(fields).match(matchOn)
+            if (commUpdateErr) console.error('[write] commissions update error:', commUpdateErr.message, JSON.stringify(matchOn))
           }
           continue
         }
 
         const commPayload = { booking_id: bookingId, amount_expected: fields.amount_expected ?? null, currency: fields.currency ?? null, channel: fields.channel ?? null, status: fields.status ?? 'pending', date_received: fields.date_received ?? null, bank_ref: fields.bank_ref ?? null, notes: fields.notes ?? null, misc: fields.misc ?? null }
         console.log(`[write] commissions insert`, JSON.stringify(commPayload))
-        await supabase.from('commissions').insert(commPayload)
+        const { error: commInsertErr } = await supabase.from('commissions').insert(commPayload)
+        if (commInsertErr) console.error('[write] commissions insert error:', commInsertErr.message, JSON.stringify(commPayload))
       } catch (err) {
         console.error('Commission write failed:', err)
       }
@@ -527,23 +777,20 @@ export async function writeExtracted(
       try {
         if (action === 'update') {
           if (Object.keys(matchOn).length) {
-            await supabase.from('clients').update(fields).match(matchOn)
+            const { error: clientUpdateErr } = await supabase.from('clients').update(fields).match(matchOn)
+            if (clientUpdateErr) console.error('[write] clients update error:', clientUpdateErr.message, JSON.stringify(matchOn))
           }
           continue
         }
 
-        // create — deduplicate by full_name
-        const { data: existing } = await supabase
-          .from('clients').select('id').ilike('full_name', fields.full_name).maybeSingle()
-        if (existing) {
-          console.log(`[write] clients update id=${existing.id}`, JSON.stringify(fields))
-          await supabase.from('clients').update({ ...fields, misc: fields.misc ?? null }).eq('id', existing.id)
-          if (!primaryClientId) primaryClientId = existing.id
-        } else {
-          console.log(`[write] clients insert`, JSON.stringify(fields))
-          const { data } = await supabase.from('clients')
-            .insert({ ...fields, misc: fields.misc ?? null }).select('id').single()
-          if (!primaryClientId) primaryClientId = data?.id ?? null
+        // create — resolved by pre-flight resolveClient for the primary client.
+        // Secondary clients (rare in PureLuxe emails) are resolved here.
+        if (c !== firstClientRec && fields.full_name) {
+          const secId = await resolveClient(buildClientInput(fields)).catch((err: any) => {
+            console.error(`[extract] resolveClient (secondary) failed:`, err)
+            return null
+          })
+          if (secId) console.log(`[write] clients secondary resolved id=${secId}`)
         }
       } catch (err) {
         console.error('Client write failed:', err)
@@ -559,20 +806,25 @@ export async function writeExtracted(
       const matchOn: Record<string, any> = p.match_on ?? {}
       const fields  = stripMeta(p)
 
-      if (!fields.client_name) continue
       try {
         if (action === 'update') {
           if (Object.keys(matchOn).length) {
-            await supabase.from('client_preferences').update(fields).match(matchOn)
+            const { error: prefUpdateErr } = await supabase.from('client_preferences').update(fields).match(matchOn)
+            if (prefUpdateErr) console.error('[write] client_preferences update error:', prefUpdateErr.message, JSON.stringify(matchOn))
           }
           continue
         }
 
-        const clientId = await resolveClient(fields.client_name).catch(() => null)
-        if (!clientId) continue
+        const clientId = primaryClientId
+          ?? (fields.client_name ? await resolveClient({ full_name: fields.client_name }).catch(() => null) : null)
+        if (!clientId) {
+          console.log(`[write] client_preferences skip — no client_id resolved`, JSON.stringify(fields))
+          continue
+        }
         const prefPayload = { client_id: clientId, category: fields.category ?? null, preference: fields.preference ?? null, preference_type: fields.preference_type ?? null, notes: fields.notes ?? null }
         console.log(`[write] client_preferences insert`, JSON.stringify(prefPayload))
-        await supabase.from('client_preferences').insert(prefPayload)
+        const { error: prefInsertErr } = await supabase.from('client_preferences').insert(prefPayload)
+        if (prefInsertErr) console.error('[write] client_preferences insert error:', prefInsertErr.message, JSON.stringify(prefPayload))
       } catch (err) {
         console.error('Client preference write failed:', err)
       }
@@ -587,20 +839,25 @@ export async function writeExtracted(
       const matchOn: Record<string, any> = h.match_on ?? {}
       const fields  = stripMeta(h)
 
-      if (!fields.client_name) continue
       try {
         if (action === 'update') {
           if (Object.keys(matchOn).length) {
-            await supabase.from('client_health_notes').update(fields).match(matchOn)
+            const { error: healthUpdateErr } = await supabase.from('client_health_notes').update(fields).match(matchOn)
+            if (healthUpdateErr) console.error('[write] client_health_notes update error:', healthUpdateErr.message, JSON.stringify(matchOn))
           }
           continue
         }
 
-        const clientId = await resolveClient(fields.client_name).catch(() => null)
-        if (!clientId) continue
+        const clientId = primaryClientId
+          ?? (fields.client_name ? await resolveClient({ full_name: fields.client_name }).catch(() => null) : null)
+        if (!clientId) {
+          console.log(`[write] client_health_notes skip — no client_id resolved`, JSON.stringify(fields))
+          continue
+        }
         const healthPayload = { client_id: clientId, condition: fields.condition ?? null, details: fields.details ?? null, dietary_restrictions: fields.dietary_restrictions ?? [], mobility_notes: fields.mobility_notes ?? null }
         console.log(`[write] client_health_notes insert`, JSON.stringify(healthPayload))
-        await supabase.from('client_health_notes').insert(healthPayload)
+        const { error: healthInsertErr } = await supabase.from('client_health_notes').insert(healthPayload)
+        if (healthInsertErr) console.error('[write] client_health_notes insert error:', healthInsertErr.message, JSON.stringify(healthPayload))
       } catch (err) {
         console.error('Health notes write failed:', err)
       }
@@ -619,7 +876,8 @@ export async function writeExtracted(
         if (action === 'update') {
           if (Object.keys(matchOn).length) {
             console.log(`[write] property_contacts update`, JSON.stringify({ match: matchOn, ...fields }))
-            await supabase.from('property_contacts').update(fields).match(matchOn)
+            const { error: pcUpdateErr } = await supabase.from('property_contacts').update(fields).match(matchOn)
+            if (pcUpdateErr) console.error('[write] property_contacts update error:', pcUpdateErr.message, JSON.stringify(matchOn))
           }
           continue
         }
@@ -638,10 +896,12 @@ export async function writeExtracted(
         }
         if (fields.email) {
           console.log(`[write] property_contacts upsert`, JSON.stringify(payload))
-          await supabase.from('property_contacts').upsert(payload, { onConflict: 'email' })
+          const { error: pcUpsertErr } = await supabase.from('property_contacts').upsert(payload, { onConflict: 'email' })
+          if (pcUpsertErr) console.error('[write] property_contacts upsert error:', pcUpsertErr.message, JSON.stringify(payload))
         } else {
           console.log(`[write] property_contacts insert`, JSON.stringify(payload))
-          await supabase.from('property_contacts').insert(payload)
+          const { error: pcInsertErr } = await supabase.from('property_contacts').insert(payload)
+          if (pcInsertErr) console.error('[write] property_contacts insert error:', pcInsertErr.message, JSON.stringify(payload))
         }
       } catch (err) {
         console.error('Property contact write failed:', err)
@@ -661,7 +921,8 @@ export async function writeExtracted(
       try {
         if (action === 'update') {
           if (Object.keys(matchOn).length) {
-            await supabase.from('properties').update(fields).match(matchOn)
+            const { error: propUpdateErr } = await supabase.from('properties').update(fields).match(matchOn)
+            if (propUpdateErr) console.error('[write] properties update error:', propUpdateErr.message, JSON.stringify(matchOn))
           }
           continue
         }
@@ -670,10 +931,12 @@ export async function writeExtracted(
           .from('properties').select('id').ilike('name', fields.name).maybeSingle()
         if (existing) {
           console.log(`[write] properties update id=${existing.id}`, JSON.stringify(fields))
-          await supabase.from('properties').update(fields).eq('id', existing.id)
+          const { error: propUpdateByIdErr } = await supabase.from('properties').update(fields).eq('id', existing.id)
+          if (propUpdateByIdErr) console.error('[write] properties update error:', propUpdateByIdErr.message, JSON.stringify(fields))
         } else {
           console.log(`[write] properties insert`, JSON.stringify(fields))
-          await supabase.from('properties').insert(fields)
+          const { error: propInsertErr } = await supabase.from('properties').insert(fields)
+          if (propInsertErr) console.error('[write] properties insert error:', propInsertErr.message, JSON.stringify(fields))
         }
       } catch (err) {
         console.error('Property write failed:', err)
@@ -692,21 +955,24 @@ export async function writeExtracted(
       try {
         if (action === 'cancel') {
           if (Object.keys(matchOn).length) {
-            await supabase.from('pre_stay_tasks').update({ status: 'cancelled' }).match(matchOn)
+            const { error: taskCancelErr } = await supabase.from('pre_stay_tasks').update({ status: 'cancelled' }).match(matchOn)
+            if (taskCancelErr) console.error('[write] pre_stay_tasks cancel error:', taskCancelErr.message, JSON.stringify(matchOn))
           }
           continue
         }
 
         if (action === 'update') {
           if (Object.keys(matchOn).length) {
-            await supabase.from('pre_stay_tasks').update(fields).match(matchOn)
+            const { error: taskUpdateErr } = await supabase.from('pre_stay_tasks').update(fields).match(matchOn)
+            if (taskUpdateErr) console.error('[write] pre_stay_tasks update error:', taskUpdateErr.message, JSON.stringify(matchOn))
           }
           continue
         }
 
         const taskPayload = { booking_id: bookingId, task_type: fields.task_type ?? null, description: fields.description ?? null, due_date: fields.due_date ?? null }
         console.log(`[write] pre_stay_tasks insert`, JSON.stringify(taskPayload))
-        await supabase.from('pre_stay_tasks').insert(taskPayload)
+        const { error: taskInsertErr } = await supabase.from('pre_stay_tasks').insert(taskPayload)
+        if (taskInsertErr) console.error('[write] pre_stay_tasks insert error:', taskInsertErr.message, JSON.stringify(taskPayload))
       } catch (err) {
         console.error('Pre-stay task write failed:', err)
       }
@@ -778,7 +1044,8 @@ export async function writeExtracted(
             continue
           }
           console.log(`[write] air_bookings update`, JSON.stringify({ match: matchOn, ...cleanPayload }))
-          await q
+          const { error: airUpdateErr } = await q
+          if (airUpdateErr) console.error('[write] air_bookings update error:', airUpdateErr.message, JSON.stringify({ match: matchOn, ...cleanPayload }))
           continue
         }
 
@@ -820,10 +1087,12 @@ export async function writeExtracted(
 
         if (existingId) {
           console.log(`[write] air_bookings update id=${existingId}`, JSON.stringify(payload))
-          await supabase.from('air_bookings').update(payload).eq('id', existingId)
+          const { error: airUpdateExistErr } = await supabase.from('air_bookings').update(payload).eq('id', existingId)
+          if (airUpdateExistErr) console.error('[write] air_bookings update error:', airUpdateExistErr.message, JSON.stringify(payload))
         } else {
           console.log(`[write] air_bookings insert`, JSON.stringify(payload))
-          await supabase.from('air_bookings').insert(payload)
+          const { error: airInsertErr } = await supabase.from('air_bookings').insert(payload)
+          if (airInsertErr) console.error('[write] air_bookings insert error:', airInsertErr.message, JSON.stringify(payload))
         }
       } catch (err) {
         console.error('Air booking write failed:', err)
@@ -842,21 +1111,24 @@ export async function writeExtracted(
       try {
         if (action === 'cancel') {
           if (Object.keys(matchOn).length) {
-            await supabase.from('airport_vip_services').update({ status: 'cancelled' }).match(matchOn)
+            const { error: vipCancelErr } = await supabase.from('airport_vip_services').update({ status: 'cancelled' }).match(matchOn)
+            if (vipCancelErr) console.error('[write] airport_vip_services cancel error:', vipCancelErr.message, JSON.stringify(matchOn))
           }
           continue
         }
 
         if (action === 'update') {
           if (Object.keys(matchOn).length) {
-            await supabase.from('airport_vip_services').update(fields).match(matchOn)
+            const { error: vipUpdateErr } = await supabase.from('airport_vip_services').update(fields).match(matchOn)
+            if (vipUpdateErr) console.error('[write] airport_vip_services update error:', vipUpdateErr.message, JSON.stringify(matchOn))
           }
           continue
         }
 
         const vipPayload = { booking_id: bookingId, airport: fields.airport ?? null, airport_name: fields.airport_name ?? null, service_type: fields.service_type ?? null, service_date: fields.service_date ?? null, flight_number: fields.flight_number ?? null, pax_names: fields.pax_names ?? [], provider: fields.provider ?? null, status: fields.status ?? null, cost: fields.cost ?? null, currency: fields.currency ?? null }
         console.log(`[write] airport_vip_services insert`, JSON.stringify(vipPayload))
-        await supabase.from('airport_vip_services').insert(vipPayload)
+        const { error: vipInsertErr } = await supabase.from('airport_vip_services').insert(vipPayload)
+        if (vipInsertErr) console.error('[write] airport_vip_services insert error:', vipInsertErr.message, JSON.stringify(vipPayload))
       } catch (err) {
         console.error('Airport VIP service write failed:', err)
       }
@@ -874,14 +1146,16 @@ export async function writeExtracted(
       try {
         if (action === 'update') {
           if (Object.keys(matchOn).length) {
-            await supabase.from('enquiries').update(fields).match(matchOn)
+            const { error: enqUpdateErr } = await supabase.from('enquiries').update(fields).match(matchOn)
+            if (enqUpdateErr) console.error('[write] enquiries update error:', enqUpdateErr.message, JSON.stringify(matchOn))
           }
           continue
         }
 
         const enquiryPayload = { email_id: emailId, client_name: fields.client_name ?? null, property_name: fields.property_name ?? null, destination: fields.destination ?? null, check_in: fields.check_in ?? null, check_out: fields.check_out ?? null, num_rooms: fields.num_rooms ?? null, num_adults: fields.num_adults ?? null, quoted_rate: fields.quoted_rate ?? null, quoted_currency: fields.quoted_currency ?? null, notes: fields.notes ?? null, misc: fields.misc ?? null }
         console.log(`[write] enquiries insert`, JSON.stringify(enquiryPayload))
-        await supabase.from('enquiries').insert(enquiryPayload)
+        const { error: enqInsertErr } = await supabase.from('enquiries').insert(enquiryPayload)
+        if (enqInsertErr) console.error('[write] enquiries insert error:', enqInsertErr.message, JSON.stringify(enquiryPayload))
       } catch (err) {
         console.error('Enquiry write failed:', err)
       }
@@ -896,7 +1170,6 @@ export async function writeExtracted(
       const matchOn: Record<string, any> = v.match_on ?? {}
       const fields  = stripMeta(v)
 
-      if (!fields.client_name && action === 'create') continue
       try {
         if (action === 'update') {
           if (!Object.keys(matchOn).length) { continue }
@@ -908,7 +1181,7 @@ export async function writeExtracted(
           if (!Object.keys(visaUpdatePayload).length) { continue }
           // Resolve client_id from match_on.client_name if present
           const matchClientId = matchOn.client_name
-            ? await resolveClient(matchOn.client_name).catch(() => null)
+            ? await resolveClient({ full_name: matchOn.client_name }).catch(() => null)
             : null
           let vq = supabase.from('visa_tracking').update(visaUpdatePayload) as any
           if (matchClientId) {
@@ -921,12 +1194,19 @@ export async function writeExtracted(
             continue
           }
           console.log(`[write] visa_tracking update`, JSON.stringify({ match: matchOn, ...visaUpdatePayload }))
-          await vq
+          const { error: visaUpdateErr } = await vq
+          if (visaUpdateErr) console.error('[write] visa_tracking update error:', visaUpdateErr.message, JSON.stringify({ match: matchOn, ...visaUpdatePayload }))
           continue
         }
 
-        const clientId = await resolveClient(fields.client_name).catch(() => null)
+        const clientId = primaryClientId
+          ?? (fields.client_name ? await resolveClient({ full_name: fields.client_name }).catch(() => null) : null)
+        if (!clientId) {
+          console.log(`[write] visa_tracking skip — no client_id resolved`, JSON.stringify(fields))
+          continue
+        }
         const visaPayload = {
+          booking_id:          bookingId,
           client_id:           clientId,
           destination_country: fields.destination_country ?? null,
           nationality:         fields.nationality         ?? null,
@@ -938,7 +1218,8 @@ export async function writeExtracted(
           notes:               fields.notes               ?? null,
         }
         console.log(`[write] visa_tracking insert`, JSON.stringify(visaPayload))
-        await supabase.from('visa_tracking').insert(visaPayload)
+        const { error: visaInsertErr } = await supabase.from('visa_tracking').insert(visaPayload)
+        if (visaInsertErr) console.error('[write] visa_tracking insert error:', visaInsertErr.message, JSON.stringify(visaPayload))
       } catch (err) {
         console.error('Visa tracking write failed:', err)
       }
@@ -948,12 +1229,15 @@ export async function writeExtracted(
 
   // ---- email_threads: link this email to every extracted record ----
   try {
-    await supabase.from('email_threads').insert({
+    const { error: threadInsertErr } = await supabase.from('email_threads').insert({
       email_id:    emailId,
       booking_id:  bookingId,
       client_id:   primaryClientId,
       property_id: primaryPropId,
     })
+    if (threadInsertErr && !threadInsertErr.message.includes('does not exist')) {
+      console.error('[write] email_threads insert error:', threadInsertErr.message)
+    }
   } catch { /* table may not exist yet */ }
 
   if (parsed.misc) {
@@ -1172,6 +1456,7 @@ export async function processEmail(
     snippet: string
     body: string | null
     inbox_address: string
+    thread_id: string
   },
   gmail: any | null,
 ): Promise<number> {
@@ -1197,6 +1482,15 @@ export async function processEmail(
     return 0
   }
 
+  // Belt-and-suspenders: if a booking already has this email_id, extraction already ran
+  const { data: existingBookings } = await supabase
+    .from('bookings').select('id').eq('email_id', email.id).limit(1)
+  if (existingBookings?.length) {
+    console.warn(`[extract] belt_and_suspenders_skip ${email.id} — booking already exists for this email_id`)
+    await markExtracted(email.id)
+    return 0
+  }
+
   console.log(`[filter] sonnet_process ${email.id}`)
 
   const parsed = await extractFromEmail(
@@ -1213,7 +1507,7 @@ export async function processEmail(
     gmail,
   )
   if (!parsed) return 0
-  return writeExtracted(parsed, email.id, email.inbox_address)
+  return writeExtracted(parsed, email.id, email.inbox_address, email.thread_id, undefined, email.body)
 }
 
 /**
@@ -1223,7 +1517,7 @@ export async function processEmail(
 export async function runExtraction(): Promise<ExtractionResult> {
   const { data: emails, error } = await supabase
     .from('inbox_emails')
-    .select('id, subject, from_email, to_addresses, email_date, snippet, body, inbox_address')
+    .select('id, subject, from_email, to_addresses, email_date, snippet, body, inbox_address, thread_id')
     .eq('booking_extracted', false)
     .limit(3)
 

@@ -96,6 +96,13 @@ function stripHtmlTags(html: string): string {
     .trim()
 }
 
+/** Sniff actual image format from magic bytes — Gmail headers can lie. */
+function sniffImageMime(data: Buffer): 'image/jpeg' | 'image/png' | null {
+  if (data.length >= 2 && data[0] === 0xff && data[1] === 0xd8) return 'image/jpeg'
+  if (data.length >= 4 && data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47) return 'image/png'
+  return null
+}
+
 export async function extractTextFromAttachment(attachment: Attachment): Promise<AttachmentContent | null> {
   const { mimeType, data, filename } = attachment
 
@@ -104,7 +111,8 @@ export async function extractTextFromAttachment(attachment: Attachment): Promise
   }
 
   if (mimeType === 'image/jpeg' || mimeType === 'image/png') {
-    return { kind: 'image', base64: data.toString('base64'), mimeType }
+    const actual = sniffImageMime(data) ?? mimeType
+    return { kind: 'image', base64: data.toString('base64'), mimeType: actual }
   }
 
   if (

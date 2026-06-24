@@ -50,10 +50,11 @@ async function handler(req: NextRequest) {
       const emailIds = results.map((r: any) => r.custom_id)
       const { data: emailRows } = await supabase
         .from('inbox_emails')
-        .select('id, inbox_address, tags')
+        .select('id, inbox_address, tags, thread_id')
         .in('id', emailIds)
-      const addrMap = new Map(emailRows?.map(e => [e.id, e.inbox_address]) ?? [])
-      const tagsMap = new Map(emailRows?.map(e => [e.id, (e.tags as string[]) ?? []]) ?? [])
+      const addrMap     = new Map(emailRows?.map(e => [e.id, e.inbox_address]) ?? [])
+      const tagsMap     = new Map(emailRows?.map(e => [e.id, (e.tags as string[]) ?? []]) ?? [])
+      const threadIdMap = new Map(emailRows?.map(e => [e.id, (e.thread_id as string) ?? '']) ?? [])
 
       for (const result of results) {
         const emailId: string = result.custom_id
@@ -73,7 +74,7 @@ async function handler(req: NextRequest) {
           const storedTags = tagsMap.get(emailId) ?? []
           const activeSections = sectionsForTags(storedTags) ?? undefined
 
-          await writeExtracted(parsed, emailId, addrMap.get(emailId) ?? '', activeSections)
+          await writeExtracted(parsed, emailId, addrMap.get(emailId) ?? '', threadIdMap.get(emailId) ?? '', activeSections)
           await markExtracted(emailId)
           previousResultsProcessed++
         } catch (err) {

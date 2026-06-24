@@ -8,7 +8,11 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "dedup:bookings": "DRY_RUN=true tsx scripts/dedup-bookings.ts",
+    "dedup:clients": "tsx scripts/dedup-clients.ts",
+    "migrate:refless-bookings": "tsx scripts/migrate-refless-bookings.ts",
+    "import:legacy": "DRY_RUN=true tsx scripts/import-legacy-bookings.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.100.1",
@@ -28,9 +32,12 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "csv-parse": "^7.0.0",
+    "dotenv": "^16.6.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.7",
     "tailwindcss": "^4",
+    "tsx": "^4.19.2",
     "typescript": "^5",
     "vitest": "^2.1.9"
   }
