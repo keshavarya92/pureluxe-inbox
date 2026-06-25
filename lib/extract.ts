@@ -542,7 +542,6 @@ export async function writeExtracted(
         console.log(`[extract] booking has no ref — routed to enquiries instead of bookings`)
         const destination = [bFields.city, bFields.country].filter(Boolean).join(', ') || null
         const prefEnqPayload = {
-          email_id:        emailId,
           client_id:       primaryClientId,
           client_name:     bFields.client_name   ?? null,
           property_name:   bFields.hotel_name    ?? null,
@@ -647,6 +646,8 @@ export async function writeExtracted(
             fields.hotel_name  ? resolveProperty(fields.hotel_name, fields.city ?? null, fields.country ?? null, fields.chain ?? null).catch(() => null) : Promise.resolve(null),
           ])
           const updatePayload: Record<string, unknown> = { ...fields }
+          // Strip generated/computed columns that cannot be set directly
+          delete updatePayload.nights
           if (clientId   !== null) updatePayload.client_id   = clientId
           if (propertyId !== null) updatePayload.property_id = propertyId
           const { error: bookingUpdateErr } = await supabase.from('bookings').update(updatePayload).match(matchOn)
@@ -682,7 +683,6 @@ export async function writeExtracted(
             console.log(`[extract] booking has no ref — routed to enquiries instead of bookings`)
             const destination = [fields.city, fields.country].filter(Boolean).join(', ') || null
             const addlEnqPayload = {
-              email_id:        emailId,
               client_id:       bClientId,
               client_name:     fields.client_name   ?? null,
               property_name:   fields.hotel_name    ?? null,
@@ -885,9 +885,12 @@ export async function writeExtracted(
         const propertyId = fields.property
           ? await resolveProperty(fields.property, null, null, null).catch(() => null)
           : null
+        if (!propertyId) {
+          console.log(`[write] property_contacts skip — could not resolve property_id for "${fields.property ?? '(null)'}"`)
+          continue
+        }
         const payload = {
           property_id: propertyId,
-          property:    fields.property   ?? null,
           name:        fields.name       ?? null,
           title:       fields.title      ?? null,
           email:       fields.email      ?? null,
@@ -969,6 +972,10 @@ export async function writeExtracted(
           continue
         }
 
+        if (!bookingId) {
+          console.warn(`[write] pre_stay_tasks skip — no booking_id resolved for this email (booking action was update with no match)`)
+          continue
+        }
         const taskPayload = { booking_id: bookingId, task_type: fields.task_type ?? null, description: fields.description ?? null, due_date: fields.due_date ?? null }
         console.log(`[write] pre_stay_tasks insert`, JSON.stringify(taskPayload))
         const { error: taskInsertErr } = await supabase.from('pre_stay_tasks').insert(taskPayload)
@@ -1152,7 +1159,7 @@ export async function writeExtracted(
           continue
         }
 
-        const enquiryPayload = { email_id: emailId, client_name: fields.client_name ?? null, property_name: fields.property_name ?? null, destination: fields.destination ?? null, check_in: fields.check_in ?? null, check_out: fields.check_out ?? null, num_rooms: fields.num_rooms ?? null, num_adults: fields.num_adults ?? null, quoted_rate: fields.quoted_rate ?? null, quoted_currency: fields.quoted_currency ?? null, notes: fields.notes ?? null, misc: fields.misc ?? null }
+        const enquiryPayload = { client_name: fields.client_name ?? null, property_name: fields.property_name ?? null, destination: fields.destination ?? null, check_in: fields.check_in ?? null, check_out: fields.check_out ?? null, num_rooms: fields.num_rooms ?? null, num_adults: fields.num_adults ?? null, quoted_rate: fields.quoted_rate ?? null, quoted_currency: fields.quoted_currency ?? null, notes: fields.notes ?? null, misc: fields.misc ?? null }
         console.log(`[write] enquiries insert`, JSON.stringify(enquiryPayload))
         const { error: enqInsertErr } = await supabase.from('enquiries').insert(enquiryPayload)
         if (enqInsertErr) console.error('[write] enquiries insert error:', enqInsertErr.message, JSON.stringify(enquiryPayload))
@@ -1230,10 +1237,10 @@ export async function writeExtracted(
   // ---- email_threads: link this email to every extracted record ----
   try {
     const { error: threadInsertErr } = await supabase.from('email_threads').insert({
-      email_id:    emailId,
-      booking_id:  bookingId,
-      client_id:   primaryClientId,
-      property_id: primaryPropId,
+      gmail_thread_id: threadId || null,
+      booking_id:      bookingId,
+      client_id:       primaryClientId,
+      property_id:     primaryPropId,
     })
     if (threadInsertErr && !threadInsertErr.message.includes('does not exist')) {
       console.error('[write] email_threads insert error:', threadInsertErr.message)
