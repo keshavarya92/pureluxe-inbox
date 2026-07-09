@@ -500,11 +500,19 @@ export async function writeExtracted(
   threadId:        string,
   activeSections?: Set<string>,
   emailBody?:      string | null,
+  emailDate?:      string | null,
 ): Promise<number> {
   if (!threadId) {
     console.error(`[extract] writeExtracted called without threadId for email ${emailId} — bookings will lack source_thread_id, dedup constraint inactive`)
   }
   console.log(`[extract] ${emailId} parsed:`, JSON.stringify(parsed, null, 2))
+
+  // Bookings from today onward enter the queue as pending_review.
+  // Legacy data (pre-cutoff) and existing confirmed records are untouched.
+  const QUEUE_CUTOFF = new Date('2026-06-27')
+  const isPendingReview = emailDate
+    ? new Date(emailDate) >= QUEUE_CUTOFF
+    : false
 
   let tablesWritten = 0
   let primaryPropId: string | null = null
@@ -564,7 +572,9 @@ export async function writeExtracted(
         primaryPropId = propId
         const bookedBy = await resolveBookedBy(inboxAddress)
         try {
-          const resolved = await resolveBooking(buildBookingInput(bFields, primaryClientId, propId, emailId, inboxAddress, bookedBy, threadId))
+          const primaryBookingInput = buildBookingInput(bFields, primaryClientId, propId, emailId, inboxAddress, bookedBy, threadId)
+          if (isPendingReview) primaryBookingInput.status = 'pending_review'
+          const resolved = await resolveBooking(primaryBookingInput)
           bookingId = resolved.bookingId
           console.log(`[extract] resolved client_id=${primaryClientId} booking_id=${bookingId} action=${resolved.action}`)
           if (resolved.action === 'inserted' && !parsed.commissions?.length
@@ -702,7 +712,9 @@ export async function writeExtracted(
           }
 
           const bookedBy    = await resolveBookedBy(inboxAddress)
-          const addlResolved = await resolveBooking(buildBookingInput(fields, bClientId, propId, emailId, inboxAddress, bookedBy, threadId))
+          const addlBookingInput = buildBookingInput(fields, bClientId, propId, emailId, inboxAddress, bookedBy, threadId)
+          if (isPendingReview) addlBookingInput.status = 'pending_review'
+          const addlResolved = await resolveBooking(addlBookingInput)
           if (!bookingId) bookingId = addlResolved.bookingId
           console.log(`[write] bookings additional booking_id=${addlResolved.bookingId} action=${addlResolved.action}`)
 
@@ -1514,7 +1526,7 @@ export async function processEmail(
     gmail,
   )
   if (!parsed) return 0
-  return writeExtracted(parsed, email.id, email.inbox_address, email.thread_id, undefined, email.body)
+  return writeExtracted(parsed, email.id, email.inbox_address, email.thread_id, undefined, email.body, email.email_date)
 }
 
 /**

@@ -6,7 +6,12 @@
       "Bash(git push *)",
       "Bash(node -e \"const p = require\\('./package.json'\\); console.log\\(JSON.stringify\\(Object.keys\\(p.dependencies\\)\\)\\)\")",
       "Bash(npm install *)",
-      "Bash(git -C c:/Users/Keshav/Desktop/pureluxe-inbox commit -m ' *)"
+      "Bash(git -C c:/Users/Keshav/Desktop/pureluxe-inbox commit -m ' *)",
+      "PowerShell(try { $r = Invoke-WebRequest -Uri \"http://localhost:3000\" -TimeoutSec 3 -UseBasicParsing; \"running: $\\($r.StatusCode\\)\" } catch { \"not running\" })",
+      "PowerShell($secret = \\(Get-Content \"c:\\\\Users\\\\Keshav\\\\Desktop\\\\pureluxe-inbox\\\\.env.local\" | Select-String \"^CRON_SECRET=\"\\).ToString\\(\\).Split\\(\"=\",2\\)[1].Trim\\(\\); $r = Invoke-WebRequest -Uri \"http://localhost:3000/api/cron/extract\" -Method POST -Headers @{ Authorization = \"Bearer $secret\" } -UseBasicParsing -TimeoutSec 120; $r.Content)",
+      "Bash(supabase --version)",
+      "Bash(npx supabase *)",
+      "Bash(npm run *)"
     ]
   }
 }

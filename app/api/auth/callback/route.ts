@@ -7,6 +7,7 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url)
   const code = searchParams.get('code')
   const error = searchParams.get('error')
+  const next = searchParams.get('state')
 
   if (error) {
     return NextResponse.redirect(new URL(`/?error=${encodeURIComponent(error)}`, req.url))
@@ -34,7 +35,8 @@ export async function GET(req: NextRequest) {
     session.email = email
     await session.save()
 
-    return NextResponse.redirect(new URL('/?connected=1', req.url))
+    const destination = next && next.startsWith('/') ? next : '/?connected=1'
+    return NextResponse.redirect(new URL(destination, req.url))
   } catch (err: any) {
     return NextResponse.redirect(
       new URL(`/?error=${encodeURIComponent(err.message)}`, req.url)

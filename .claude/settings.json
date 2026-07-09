@@ -3,7 +3,12 @@
     "allow": [
       "Bash(git -C c:/Users/Keshav/Desktop/pureluxe-inbox commit -m ' *)",
       "Bash(git -C \"c:/Users/Keshav/Desktop/pureluxe-inbox\" add lib/store.ts)",
-      "Bash(git -C \"c:/Users/Keshav/Desktop/pureluxe-inbox\" add lib/extract.ts supabase/schema.sql)"
+      "Bash(git -C \"c:/Users/Keshav/Desktop/pureluxe-inbox\" add lib/extract.ts supabase/schema.sql)",
+      "PowerShell($secret = \"25af9d0c17f755bca78045442b726418e8ae68aea7b14d6815f8f044f6769aef\"; $response = Invoke-RestMethod -Uri \"https://pureluxe-inbox.vercel.app/api/cron/batch-submit\" -Method POST -Headers @{ \"Authorization\" = \"Bearer $secret\" } -ContentType \"application/json\"; $response | ConvertTo-Json -Depth 5)",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\({k:d.get\\(k,{}\\) for k in ['scripts','devDependencies','dependencies']}, indent=2\\)\\)\")",
+      "Bash(npx vitest *)",
+      "Bash(npm test *)",
+      "Bash(DRY_RUN=true npx tsx scripts/import-legacy-bookings.ts)"
     ]
   }
 }
