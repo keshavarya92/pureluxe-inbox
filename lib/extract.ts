@@ -661,10 +661,22 @@ export async function writeExtracted(
           if (propertyId !== null) updatePayload.property_id = propertyId
           const { error: bookingUpdateErr } = await supabase.from('bookings').update(updatePayload).match(matchOn)
           if (bookingUpdateErr) console.error('[write] bookings update error:', bookingUpdateErr.message, JSON.stringify(matchOn))
-          if (!bookingId) {
-            const { data: found } = await supabase.from('bookings').select('id').match(matchOn).maybeSingle()
-            if (found) bookingId = found.id
+          const { data: found } = await supabase.from('bookings').select('id').match(matchOn).maybeSingle()
+          if (found) {
+            if (!bookingId) bookingId = found.id
+            continue
           }
+          // Orphaned update — matchOn found no existing row; insert as new booking
+          const orphanClientId = clientId ?? primaryClientId
+          if (!orphanClientId || !fields.check_in || !fields.check_out) {
+            console.warn(`[write] bookings orphaned update — missing client_id or dates, skipping`, JSON.stringify(matchOn))
+            continue
+          }
+          const bookedBy = await resolveBookedBy(inboxAddress)
+          const orphanInput = buildBookingInput(fields, orphanClientId, propertyId, emailId, inboxAddress, bookedBy, threadId)
+          const orphanResolved = await resolveBooking(orphanInput, isPendingReview)
+          if (!bookingId) bookingId = orphanResolved.bookingId
+          console.log(`[write] bookings orphaned update → inserted id=${orphanResolved.bookingId}`)
           continue
         }
 
