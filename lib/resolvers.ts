@@ -354,6 +354,21 @@ async function flagThreadClientConflict(
   if (error) console.error('[resolver] booking_conflict_flags insert error:', error.message)
 }
 
+// Fields that are high-risk to update without human review.
+// If an incoming update touches any of these on a confirmed booking,
+// route to pending_review instead of writing through.
+const HIGH_RISK_FIELDS = new Set(['status', 'check_in', 'check_out', 'hotel_name'])
+
+function shouldQueueUpdate(
+  existing: Record<string, any>,
+  patch: Record<string, any>,
+  isPendingReview: boolean,
+): boolean {
+  if (!isPendingReview) return false
+  if (existing.status !== 'confirmed') return false
+  return Object.keys(patch).some(k => HIGH_RISK_FIELDS.has(k))
+}
+
 // ----------------------------------------------------------------
 // resolveBooking
 // Returns { bookingId, action } — existing row merged or new row inserted.
@@ -383,6 +398,9 @@ export async function resolveBooking(
     if (threadMatch) {
       const patch = buildBookingPatch(threadMatch, incoming)
       if (Object.keys(patch).length) {
+        if (shouldQueueUpdate(threadMatch, patch, isPendingReview)) {
+          patch.status = 'pending_review'
+        }
         await supabase
           .from('bookings')
           .update({ ...patch, updated_at: new Date().toISOString() })
@@ -414,6 +432,9 @@ export async function resolveBooking(
         if (conflictRow) {
           const patch = buildBookingPatch(conflictRow, incoming)
           if (Object.keys(patch).length) {
+            if (shouldQueueUpdate(conflictRow, patch, isPendingReview)) {
+              patch.status = 'pending_review'
+            }
             await supabase
               .from('bookings')
               .update({ ...patch, updated_at: new Date().toISOString() })
@@ -481,6 +502,9 @@ export async function resolveBooking(
   if (matched) {
     const patch = buildBookingPatch(matched, incoming)
     if (Object.keys(patch).length) {
+      if (shouldQueueUpdate(matched, patch, isPendingReview)) {
+        patch.status = 'pending_review'
+      }
       await supabase.from('bookings')
         .update({ ...patch, updated_at: new Date().toISOString() })
         .eq('id', matched.id)
@@ -542,6 +566,9 @@ export async function resolveBooking(
 
   const patch = buildBookingPatch(fallback, incoming)
   if (Object.keys(patch).length) {
+    if (shouldQueueUpdate(fallback, patch, isPendingReview)) {
+      patch.status = 'pending_review'
+    }
     await supabase.from('bookings')
       .update({ ...patch, updated_at: new Date().toISOString() })
       .eq('id', fallback.id)
