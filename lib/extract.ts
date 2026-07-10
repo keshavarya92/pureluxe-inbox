@@ -573,8 +573,7 @@ export async function writeExtracted(
         const bookedBy = await resolveBookedBy(inboxAddress)
         try {
           const primaryBookingInput = buildBookingInput(bFields, primaryClientId, propId, emailId, inboxAddress, bookedBy, threadId)
-          if (isPendingReview) primaryBookingInput.status = 'pending_review'
-          const resolved = await resolveBooking(primaryBookingInput)
+          const resolved = await resolveBooking(primaryBookingInput, isPendingReview)
           bookingId = resolved.bookingId
           console.log(`[extract] resolved client_id=${primaryClientId} booking_id=${bookingId} action=${resolved.action}`)
           if (resolved.action === 'inserted' && !parsed.commissions?.length
@@ -713,8 +712,7 @@ export async function writeExtracted(
 
           const bookedBy    = await resolveBookedBy(inboxAddress)
           const addlBookingInput = buildBookingInput(fields, bClientId, propId, emailId, inboxAddress, bookedBy, threadId)
-          if (isPendingReview) addlBookingInput.status = 'pending_review'
-          const addlResolved = await resolveBooking(addlBookingInput)
+          const addlResolved = await resolveBooking(addlBookingInput, isPendingReview)
           if (!bookingId) bookingId = addlResolved.bookingId
           console.log(`[write] bookings additional booking_id=${addlResolved.bookingId} action=${addlResolved.action}`)
 

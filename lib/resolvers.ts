@@ -363,6 +363,7 @@ async function flagThreadClientConflict(
 
 export async function resolveBooking(
   incoming: BookingInput,
+  isPendingReview = false,
 ): Promise<{ bookingId: string; action: 'inserted' | 'updated' }> {
   const { client_id, property_id, check_in, check_out, source_thread_id } = incoming
 
@@ -392,6 +393,7 @@ export async function resolveBooking(
     }
 
     // No prior booking for this thread+client+stay — insert.
+    if (isPendingReview) incoming.status = 'pending_review'
     const { data: inserted, error: insertErr } = await supabase
       .from('bookings')
       .insert(incoming)
@@ -453,6 +455,7 @@ export async function resolveBooking(
   const { data: candidates } = await q
 
   if (!candidates?.length) {
+    if (isPendingReview) incoming.status = 'pending_review'
     const { data, error } = await supabase.from('bookings').insert(incoming).select('id').single()
     if (error) throw new Error(`bookings insert: ${error.message}`)
     console.log(`[resolver] bookings insert id=${data.id}`)
@@ -488,6 +491,7 @@ export async function resolveBooking(
 
   // No ref overlap AND incoming has refs → separate booking (different room/confirmation)
   if (incomingHasRefs) {
+    if (isPendingReview) incoming.status = 'pending_review'
     const { data, error } = await supabase.from('bookings').insert(incoming).select('id').single()
     if (error) throw new Error(`bookings insert (separate room): ${error.message}`)
     console.log(`[resolver] bookings insert (separate room) id=${data.id}`)
@@ -502,6 +506,7 @@ export async function resolveBooking(
       && Number(incoming.num_rooms) !== Number(fallback.num_rooms)) {
     const details = `num_rooms existing=${fallback.num_rooms} incoming=${incoming.num_rooms} booking_id=${fallback.id}`
     console.log(`[resolver] booking_merge_skipped_inconsistent ${details}`)
+    if (isPendingReview) incoming.status = 'pending_review'
     const { data, error } = await supabase.from('bookings').insert(incoming).select('id').single()
     if (error) throw new Error(`bookings insert (num_rooms mismatch): ${error.message}`)
     console.log(`[resolver] bookings insert (num_rooms mismatch) id=${data.id}`)
@@ -516,6 +521,7 @@ export async function resolveBooking(
       if (pctDiff > 0.10) {
         const details = `total_cost existing=${fallback.total_cost} incoming=${incoming.total_cost} diff=${(pctDiff * 100).toFixed(1)}% booking_id=${fallback.id}`
         console.log(`[resolver] booking_merge_skipped_inconsistent ${details}`)
+        if (isPendingReview) incoming.status = 'pending_review'
         const { data, error } = await supabase.from('bookings').insert(incoming).select('id').single()
         if (error) throw new Error(`bookings insert (cost mismatch): ${error.message}`)
         console.log(`[resolver] bookings insert (cost mismatch) id=${data.id}`)
