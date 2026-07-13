@@ -1,5 +1,5 @@
 import { supabase } from '@/lib/supabase'
-import type { Booking, Client, QueueBooking, ClientRecord, QueueClient, MissingField } from './types'
+import type { Booking, Client, QueueBooking, ClientRecord, QueueClient, MissingField, RelationshipContact } from './types'
 import { computeQueueEnrichment } from './trip-grouping'
 
 // ----------------------------------------------------------------
@@ -161,7 +161,15 @@ export async function getPendingClients(): Promise<QueueClient[]> {
   const clients = (data ?? []) as ClientRecord[]
 
   return Promise.all(clients.map(async (client) => {
-    const missing_required = computeClientMissingFields(client)
+    const [duplicate_warning, relationship_via] = await Promise.all([
+      findSimilarClient(client),
+      findRelationshipContact(client.id),
+    ])
+
+    let missing_required = computeClientMissingFields(client)
+    if (relationship_via) {
+      missing_required = missing_required.filter(f => f.field !== 'phone')
+    }
 
     const { count } = await supabase
       .from('bookings')
@@ -169,13 +177,12 @@ export async function getPendingClients(): Promise<QueueClient[]> {
       .eq('client_id', client.id)
     const booking_count = count ?? 0
 
-    const duplicate_warning = await findSimilarClient(client)
-
     return {
       ...client,
       missing_required,
       booking_count,
       duplicate_warning,
+      relationship_via,
     }
   }))
 }
@@ -236,6 +243,78 @@ async function findSimilarClient(
   } catch {
     return null
   }
+}
+
+// Find a linked client who can be reached on this client's behalf
+// (e.g. a child's record linked to their mother's contact details).
+// Checks both relationship directions; returns the first linked client
+// that actually has a phone or email.
+async function findRelationshipContact(clientId: string): Promise<RelationshipContact | null> {
+  const { data: links } = await supabase
+    .from('client_relationships')
+    .select('primary_client_id, related_client_id, relationship_type')
+    .or(`primary_client_id.eq.${clientId},related_client_id.eq.${clientId}`)
+
+  if (!links?.length) return null
+
+  for (const link of links) {
+    const otherId = link.primary_client_id === clientId ? link.related_client_id : link.primary_client_id
+    if (!otherId) continue
+
+    const { data: other } = await supabase
+      .from('clients')
+      .select('id, full_name, phone, email')
+      .eq('id', otherId)
+      .maybeSingle()
+
+    if (other && (other.phone || other.email)) {
+      return {
+        client_id: other.id,
+        client_name: other.full_name,
+        relationship_type: link.relationship_type ?? 'related',
+      }
+    }
+  }
+
+  return null
+}
+
+// Link a client to a contactable relative/associate so the reviewer can
+// approve them without fabricating contact details (e.g. a child linked
+// to their mother). contactClientId must already have a phone or email.
+export async function linkClientRelationship(
+  dependentClientId: string,
+  contactClientId: string,
+  relationshipType: string,
+  notes?: string | null,
+): Promise<void> {
+  const { error } = await supabase.from('client_relationships').insert({
+    primary_client_id: contactClientId,
+    related_client_id: dependentClientId,
+    relationship_type:  relationshipType,
+    notes:               notes ?? null,
+  })
+
+  if (error) throw new Error(`linkClientRelationship: ${error.message}`)
+}
+
+// Simple name search for the relationship-link picker.
+export async function searchClients(
+  query: string,
+  excludeId?: string,
+): Promise<Array<Pick<ClientRecord, 'id' | 'full_name' | 'phone' | 'email'>>> {
+  if (!query.trim()) return []
+
+  let q = supabase
+    .from('clients')
+    .select('id, full_name, phone, email')
+    .ilike('full_name', `%${query}%`)
+    .limit(8)
+  if (excludeId) q = q.neq('id', excludeId)
+
+  const { data, error } = await q
+  if (error) throw new Error(`searchClients: ${error.message}`)
+  return data ?? []
 }
 
 export async function approveClient(id: string, reviewedBy: string): Promise<void> {

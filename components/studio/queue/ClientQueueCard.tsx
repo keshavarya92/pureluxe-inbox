@@ -176,6 +176,150 @@ function MergePanel({ incoming, similarClientId, onMerged, onCancel }: MergePane
 }
 
 // ----------------------------------------------------------------
+// RelationshipLinkPanel
+// ----------------------------------------------------------------
+
+interface ClientSearchResult {
+  id: string
+  full_name: string
+  phone: string | null
+  email: string | null
+}
+
+const RELATIONSHIP_SUGGESTIONS = ['Mother', 'Father', 'Spouse', 'Guardian', 'Sibling', 'Assistant']
+
+interface RelationshipLinkPanelProps {
+  clientId: string
+  onLinked: () => void
+  onCancel: () => void
+}
+
+function RelationshipLinkPanel({ clientId, onLinked, onCancel }: RelationshipLinkPanelProps) {
+  const [query, setQuery]           = useState('')
+  const [results, setResults]       = useState<ClientSearchResult[]>([])
+  const [searching, setSearching]   = useState(false)
+  const [selected, setSelected]     = useState<ClientSearchResult | null>(null)
+  const [relationshipType, setRelationshipType] = useState('')
+  const [linking, setLinking]       = useState(false)
+
+  useEffect(() => {
+    if (!query.trim() || selected) { setResults([]); return }
+    setSearching(true)
+    const handle = setTimeout(() => {
+      fetch(`/api/studio/clients/search?q=${encodeURIComponent(query)}&exclude=${clientId}`)
+        .then(r => r.json())
+        .then(d => setResults(d.clients ?? []))
+        .catch(() => setResults([]))
+        .finally(() => setSearching(false))
+    }, 300)
+    return () => clearTimeout(handle)
+  }, [query, selected, clientId])
+
+  async function handleLink() {
+    if (!selected || !relationshipType.trim()) return
+    setLinking(true)
+    try {
+      const res = await fetch(`/api/studio/queue/clients/${clientId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action:            'link_relationship',
+          relatedClientId:   selected.id,
+          relationshipType:  relationshipType.trim(),
+        }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        throw new Error(body?.error ?? `Link failed (${res.status})`)
+      }
+      onLinked()
+    } catch (err: any) {
+      alert(err.message)
+    } finally {
+      setLinking(false)
+    }
+  }
+
+  return (
+    <div className="mt-3 mb-3 bg-[#E6F1FB] border border-[#B5D4F4] rounded-md p-3">
+      <p className="text-[11px] font-medium text-[#0C447C] mb-2">
+        Link to a contactable client instead of adding phone/email
+      </p>
+
+      {selected ? (
+        <div className="flex items-center justify-between bg-white rounded-md px-2.5 py-1.5 mb-2 border border-[#B5D4F4]">
+          <span className="text-[12px] text-[#0F0F0D]">{selected.full_name}</span>
+          <button
+            onClick={() => { setSelected(null); setQuery('') }}
+            className="text-[10px] text-[#0C447C] hover:underline"
+          >
+            Change
+          </button>
+        </div>
+      ) : (
+        <div className="mb-2">
+          <input
+            type="text"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            placeholder="Search clients by name…"
+            className="w-full text-[12px] text-[#0F0F0D] border border-[#B5D4F4] rounded px-2 py-1.5 bg-white focus:outline-none focus:border-[#0C447C]"
+          />
+          {query.trim() && (
+            <div className="mt-1 bg-white border border-[#B5D4F4] rounded-md max-h-40 overflow-y-auto">
+              {searching ? (
+                <p className="text-[11px] text-[#6B6A67] px-2 py-1.5">Searching…</p>
+              ) : results.length ? (
+                results.map(r => (
+                  <button
+                    key={r.id}
+                    onClick={() => { setSelected(r); setResults([]) }}
+                    className="w-full text-left px-2 py-1.5 hover:bg-[#F5F4F1] border-b border-[#F0EFEC] last:border-0"
+                  >
+                    <p className="text-[12px] text-[#0F0F0D]">{r.full_name}</p>
+                    <p className="text-[10px] text-[#9B9A97]">{r.phone || r.email || 'No contact info'}</p>
+                  </button>
+                ))
+              ) : (
+                <p className="text-[11px] text-[#6B6A67] px-2 py-1.5">No matches</p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      <input
+        type="text"
+        list="relationship-suggestions"
+        value={relationshipType}
+        onChange={e => setRelationshipType(e.target.value)}
+        placeholder="Relationship (e.g. Mother)"
+        className="w-full text-[12px] text-[#0F0F0D] border border-[#B5D4F4] rounded px-2 py-1.5 bg-white focus:outline-none focus:border-[#0C447C]"
+      />
+      <datalist id="relationship-suggestions">
+        {RELATIONSHIP_SUGGESTIONS.map(s => <option key={s} value={s} />)}
+      </datalist>
+
+      <div className="flex gap-2 mt-2">
+        <button
+          onClick={onCancel}
+          className="text-[11px] text-[#0C447C] border border-[#B5D4F4] px-3 py-1.5 rounded-md hover:bg-[#B5D4F4] mr-auto"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={handleLink}
+          disabled={!selected || !relationshipType.trim() || linking}
+          className="text-[11px] bg-[#0C447C] text-white px-3 py-1.5 rounded-md hover:opacity-90 disabled:opacity-50"
+        >
+          {linking ? 'Linking…' : 'Link'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ----------------------------------------------------------------
 // ClientQueueCard
 // ----------------------------------------------------------------
 
@@ -185,6 +329,7 @@ export function ClientQueueCard({ client, onApprove, onReject, onRefresh }: Prop
   const [saving, setSaving]     = useState(false)
   const [mergeDismissed, setMergeDismissed] = useState(false)
   const [showMergePanel, setShowMergePanel] = useState(false)
+  const [showRelationshipPanel, setShowRelationshipPanel] = useState(false)
   const [editFields, setEditFields] = useState({
     full_name:         client.full_name ?? '',
     email:             client.email ?? '',
@@ -376,11 +521,28 @@ export function ClientQueueCard({ client, onApprove, onReject, onRefresh }: Prop
         </div>
       )}
 
+      {/* Linked relationship (waives phone/email requirement) */}
+      {client.relationship_via && (
+        <div className="text-[11px] text-[#0C447C] mb-3">
+          Reachable via <span className="font-medium">{client.relationship_via.client_name}</span>
+          {' '}({client.relationship_via.relationship_type})
+        </div>
+      )}
+
       {/* Missing required warning */}
       {client.missing_required.length > 0 && (
         <div className="text-[11px] text-[#E24B4A] mb-3">
           Required before approving: {client.missing_required.map(f => f.label).join(', ')}
         </div>
+      )}
+
+      {/* Link-to-relative panel */}
+      {showRelationshipPanel && !client.relationship_via && (
+        <RelationshipLinkPanel
+          clientId={client.id}
+          onLinked={() => { setShowRelationshipPanel(false); onRefresh() }}
+          onCancel={() => setShowRelationshipPanel(false)}
+        />
       )}
 
       {/* Actions */}
@@ -409,6 +571,14 @@ export function ClientQueueCard({ client, onApprove, onReject, onRefresh }: Prop
             >
               Edit fields
             </button>
+            {!client.relationship_via && client.missing_required.some(f => f.field === 'phone') && (
+              <button
+                onClick={() => setShowRelationshipPanel(v => !v)}
+                className="text-[11px] text-[#0C447C] border border-[#B5D4F4] px-3 py-1.5 rounded-md hover:bg-[#E6F1FB]"
+              >
+                {showRelationshipPanel ? 'Cancel link' : 'Link relationship'}
+              </button>
+            )}
             <button
               onClick={handleReject}
               disabled={loading !== null}

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getStudioUser } from '@/lib/studio/auth'
-import { approveClient, rejectClient, updateClientFields } from '@/lib/studio/queries'
+import { approveClient, rejectClient, updateClientFields, linkClientRelationship } from '@/lib/studio/queries'
 
 export async function POST(
   req: NextRequest,
@@ -10,13 +10,20 @@ export async function POST(
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { id } = await params
-  const { action } = await req.json()
+  const body = await req.json()
+  const { action } = body
 
   try {
     if (action === 'approve') {
       await approveClient(id, user.email)
     } else if (action === 'reject') {
       await rejectClient(id, user.email)
+    } else if (action === 'link_relationship') {
+      const { relatedClientId, relationshipType, notes } = body
+      if (!relatedClientId || !relationshipType) {
+        return NextResponse.json({ error: 'relatedClientId and relationshipType are required' }, { status: 400 })
+      }
+      await linkClientRelationship(id, relatedClientId, relationshipType, notes ?? null)
     } else {
       return NextResponse.json({ error: 'Unknown action' }, { status: 400 })
     }

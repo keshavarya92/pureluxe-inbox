@@ -152,6 +152,15 @@ export interface QueueClient extends ClientRecord {
   missing_required: MissingField[]
   duplicate_warning: ClientDuplicateWarning | null
   booking_count: number
+  relationship_via: RelationshipContact | null
+}
+
+// A linked client that can be reached on this client's behalf
+// (e.g. a child's record linked to their mother's contact details)
+export interface RelationshipContact {
+  client_id: string
+  client_name: string
+  relationship_type: string
 }
 
 export interface ClientDuplicateWarning {
