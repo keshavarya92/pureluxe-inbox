@@ -1,4 +1,4 @@
-import type { Booking, Client, QueueBooking, DuplicateWarning, TripSuggestion, MissingField } from './types'
+import type { Booking, Client, QueueBooking, DuplicateWarning, TripSuggestion, MissingField, TripGroup } from './types'
 
 // Required fields for a booking to be approvable
 const REQUIRED_FIELDS: Array<{ field: keyof Booking; label: string }> = [
@@ -212,4 +212,106 @@ export function computeQueueEnrichment(
       trip_suggestion,
     }
   })
+}
+
+// ----------------------------------------------------------------
+// Trip grouping for Trips view
+// ----------------------------------------------------------------
+
+// Group confirmed bookings into TripGroup objects.
+// Grouping priority:
+// 1. Same trip_id (explicit)
+// 2. Same group_name (explicit group)
+// 3. Same client_name + consecutive dates (check_in within 1 day of another leg's check_out)
+// 4. Ungrouped — each booking is its own trip
+
+export function groupBookingsIntoTrips(bookings: Booking[]): TripGroup[] {
+  const used = new Set<string>()
+  const groups: TripGroup[] = []
+
+  // Sort by client_name then check_in
+  const sorted = [...bookings].sort((a, b) => {
+    const nameCompare = (a.client_name ?? '').localeCompare(b.client_name ?? '')
+    if (nameCompare !== 0) return nameCompare
+    return (a.check_in ?? '').localeCompare(b.check_in ?? '')
+  })
+
+  for (const booking of sorted) {
+    if (used.has(booking.id)) continue
+
+    // Find all legs that belong with this booking
+    const legs: Booking[] = [booking]
+    used.add(booking.id)
+
+    for (const other of sorted) {
+      if (used.has(other.id)) continue
+
+      const belongs =
+        // Same trip_id
+        (booking.trip_id && other.trip_id && booking.trip_id === other.trip_id) ||
+        // Same group_name
+        (booking.group_name && other.group_name && booking.group_name === other.group_name) ||
+        // Same client_name + consecutive dates
+        (
+          booking.client_name &&
+          other.client_name &&
+          booking.client_name.toLowerCase().trim() === other.client_name.toLowerCase().trim() &&
+          isConsecutive(legs, other)
+        )
+
+      if (belongs) {
+        legs.push(other)
+        used.add(other.id)
+      }
+    }
+
+    // Sort legs by check_in
+    legs.sort((a, b) => (a.check_in ?? '').localeCompare(b.check_in ?? ''))
+
+    groups.push(buildTripGroup(legs))
+  }
+
+  // Sort groups by earliest check_in
+  return groups.sort((a, b) => a.earliest_check_in.localeCompare(b.earliest_check_in))
+}
+
+function isConsecutive(existingLegs: Booking[], candidate: Booking): boolean {
+  if (!candidate.check_in) return false
+  return existingLegs.some(leg => {
+    if (!leg.check_out) return false
+    const legOut  = new Date(leg.check_out)
+    const candIn  = new Date(candidate.check_in!)
+    const diffMs  = Math.abs(candIn.getTime() - legOut.getTime())
+    const diffDays = diffMs / (1000 * 60 * 60 * 24)
+    return diffDays <= 1
+  })
+}
+
+function buildTripGroup(legs: Booking[]): TripGroup {
+  const earliest = legs[0].check_in ?? ''
+  const latest   = legs[legs.length - 1].check_out ?? ''
+  const cities   = [...new Set(legs.map(l => l.city).filter(Boolean) as string[])]
+
+  const mostUrgent = legs
+    .map(l => l.cancellation_deadline)
+    .filter(Boolean)
+    .sort()[0] ?? null
+
+  return {
+    key: legs.map(l => l.id).join('-'),
+    display_name:      legs[0].group_name ?? legs[0].client_name ?? 'Unknown',
+    client_name:       legs[0].client_name ?? '',
+    group_name:        legs[0].group_name ?? null,
+    legs,
+    earliest_check_in: earliest,
+    latest_check_out:  latest,
+    total_nights:      legs.reduce((sum, l) => sum + (l.nights ?? 0), 0),
+    cities,
+    vip_flag:          legs.some(l => l.vip_flag),
+    vvip_flag:         legs.some(l => l.vvip_flag),
+    special_occasion:  legs.find(l => l.special_occasion)?.special_occasion ?? null,
+    is_group_booking:  legs.some(l => l.is_group_booking),
+    is_multi_leg:      legs.length > 1,
+    most_urgent_deadline: mostUrgent,
+  }
 }

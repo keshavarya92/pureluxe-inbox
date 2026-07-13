@@ -8,6 +8,7 @@ export type BookingStatus =
   | 'rejected'
   | 'enquiry'
   | 'pending'
+  | 'superseded'
 
 // Raw booking row from Supabase — matches bookings table exactly
 export interface Booking {
@@ -158,4 +159,29 @@ export interface ClientDuplicateWarning {
   similar_client_id: string
   similar_client_name: string
   similarity_score: number
+}
+
+// A trip group — one or more booking legs under one card
+export interface TripGroup {
+  // Unique key for React — client_name + earliest check_in
+  key: string
+  // Display name — group_name if set, otherwise client_name
+  display_name: string
+  client_name: string
+  group_name: string | null
+  // All booking legs ordered by check_in
+  legs: Booking[]
+  // Computed from legs
+  earliest_check_in: string
+  latest_check_out: string
+  total_nights: number
+  cities: string[]
+  // Flags — true if ANY leg has this flag
+  vip_flag: boolean
+  vvip_flag: boolean
+  special_occasion: string | null
+  is_group_booking: boolean
+  is_multi_leg: boolean
+  // Urgency — from most urgent leg
+  most_urgent_deadline: string | null
 }

@@ -371,3 +371,78 @@ export async function getUpcomingCheckins(daysAhead = 7): Promise<Booking[]> {
   if (error) return []
   return (data ?? []) as Booking[]
 }
+
+// ----------------------------------------------------------------
+// Trips queries
+// ----------------------------------------------------------------
+
+export async function getActiveTrips(): Promise<Booking[]> {
+  const today = new Date().toISOString().slice(0, 10)
+  const { data, error } = await supabase
+    .from('bookings')
+    .select('*')
+    .eq('status', 'confirmed')
+    .lte('check_in', today)
+    .gte('check_out', today)
+    .order('check_in', { ascending: true })
+
+  if (error) throw new Error(`getActiveTrips: ${error.message}`)
+  return (data ?? []) as Booking[]
+}
+
+export async function getUpcomingTrips(): Promise<Booking[]> {
+  const today = new Date().toISOString().slice(0, 10)
+  const { data, error } = await supabase
+    .from('bookings')
+    .select('*')
+    .eq('status', 'confirmed')
+    .gt('check_in', today)
+    .order('check_in', { ascending: true })
+
+  if (error) throw new Error(`getUpcomingTrips: ${error.message}`)
+  return (data ?? []) as Booking[]
+}
+
+export async function getPastTrips(): Promise<Booking[]> {
+  const today = new Date().toISOString().slice(0, 10)
+  const { data, error } = await supabase
+    .from('bookings')
+    .select('*')
+    .in('status', ['confirmed', 'checked_out'])
+    .lt('check_out', today)
+    .order('check_out', { ascending: false })
+    .limit(100)
+
+  if (error) throw new Error(`getPastTrips: ${error.message}`)
+  return (data ?? []) as Booking[]
+}
+
+export async function getBookingById(id: string): Promise<Booking | null> {
+  const { data, error } = await supabase
+    .from('bookings')
+    .select('*')
+    .eq('id', id)
+    .single()
+
+  if (error) return null
+  return data as Booking
+}
+
+export async function markBookingSuperseded(
+  oldBookingId: string,
+  newBookingId: string,
+  reviewedBy: string,
+): Promise<void> {
+  const { error } = await supabase
+    .from('bookings')
+    .update({
+      status: 'superseded',
+      amended_from: newBookingId,
+      reviewed_by: reviewedBy,
+      reviewed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', oldBookingId)
+
+  if (error) throw new Error(`markBookingSuperseded: ${error.message}`)
+}
