@@ -41,6 +41,7 @@ export async function GET() {
       upcoming,
       pendingBookings,
       pendingClients,
+      userEmail: user.email,
     })
   } catch (err: any) {
     console.error('[studio/home] error:', err)

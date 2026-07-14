@@ -1,5 +1,5 @@
 import { supabase } from '@/lib/supabase'
-import type { Booking, Client, QueueBooking, ClientRecord, QueueClient, MissingField, RelationshipContact } from './types'
+import type { Booking, Client, QueueBooking, ClientRecord, QueueClient, MissingField, RelationshipContact, Family, FamilyMember, FamilyWithMembers, FamilyMemberRole, ClientProfile } from './types'
 import { computeQueueEnrichment } from './trip-grouping'
 
 // ----------------------------------------------------------------
@@ -524,4 +524,247 @@ export async function markBookingSuperseded(
     .eq('id', oldBookingId)
 
   if (error) throw new Error(`markBookingSuperseded: ${error.message}`)
+}
+
+// ----------------------------------------------------------------
+// Clients tab queries
+// ----------------------------------------------------------------
+
+export async function searchClientDirectory(
+  query: string,
+  sort: 'name_asc' | 'name_desc' | 'last_booking' | 'spend_desc' | 'date_added' = 'name_asc',
+  filter: 'all' | 'vip' | 'vvip' | 'has_family' | 'no_contact' = 'all',
+): Promise<ClientRecord[]> {
+  let q = supabase
+    .from('clients')
+    .select('*')
+    .eq('active', true)
+
+  if (query.trim()) {
+    q = q.or(`full_name.ilike.%${query}%,email.ilike.%${query}%,phone.ilike.%${query}%`)
+  }
+
+  if (filter === 'vip')    q = q.eq('vip_level', 'vip')
+  if (filter === 'vvip')   q = q.eq('vip_level', 'vvip')
+  if (filter === 'no_contact') q = q.is('email', null).is('phone', null)
+
+  if (sort === 'name_asc')  q = q.order('full_name', { ascending: true })
+  if (sort === 'name_desc') q = q.order('full_name', { ascending: false })
+  if (sort === 'date_added') q = q.order('created_at', { ascending: false })
+  // last_booking and spend_desc handled client-side after join
+
+  const { data, error } = await q.limit(100)
+  if (error) throw new Error(`searchClientDirectory: ${error.message}`)
+  return (data ?? []) as ClientRecord[]
+}
+
+export async function getClientProfile(id: string): Promise<ClientProfile | null> {
+  // 1. Client record
+  const { data: client, error } = await supabase
+    .from('clients')
+    .select('*')
+    .eq('id', id)
+    .single()
+
+  if (error || !client) return null
+
+  // 2. Bookings
+  const { data: bookings } = await supabase
+    .from('bookings')
+    .select('*')
+    .eq('client_id', id)
+    .order('check_in', { ascending: false })
+
+  const clientBookings = (bookings ?? []) as Booking[]
+
+  // 3. Total spend
+  const total_spend_usd = clientBookings.reduce((sum, b) => sum + (b.total_cost_usd ?? 0), 0)
+
+  // 4. Family membership
+  const { data: membership } = await supabase
+    .from('family_members')
+    .select('*, family:families(*)')
+    .eq('client_id', id)
+    .single()
+
+  let family: FamilyWithMembers | null = null
+  let family_role: FamilyMemberRole | null = null
+
+  if (membership?.family) {
+    family_role = membership.role as FamilyMemberRole
+
+    // Get all family members
+    const { data: allMembers } = await supabase
+      .from('family_members')
+      .select('*, client:clients(*)')
+      .eq('family_id', membership.family_id)
+
+    // Family spend
+    const memberIds = (allMembers ?? []).map((m: any) => m.client_id)
+    const { data: familyBookings } = await supabase
+      .from('bookings')
+      .select('total_cost_usd')
+      .in('client_id', memberIds)
+
+    const familySpend = (familyBookings ?? []).reduce((sum: number, b: any) => sum + (b.total_cost_usd ?? 0), 0)
+
+    family = {
+      ...membership.family,
+      members: (allMembers ?? []) as FamilyMember[],
+      total_spend_usd: familySpend,
+      booking_count: familyBookings?.length ?? 0,
+    }
+  }
+
+  // 5. Similar clients for merge suggestion
+  const { data: similar } = await supabase
+    .rpc('find_similar_clients', {
+      input_name: client.normalized_name ?? client.full_name,
+      threshold: 0.65,
+    })
+
+  const similar_clients = ((similar ?? []) as Array<{ id: string; sim: number }>)
+    .filter(r => r.id !== id)
+    .slice(0, 3)
+    .map(r => ({
+      id: r.id,
+      full_name: '',
+      similarity_score: r.sim,
+    }))
+
+  // 6. Family suggestions — same surname
+  const surname = client.last_name ?? client.full_name.split(' ').pop() ?? ''
+  const { data: surnameMatches } = await supabase
+    .from('clients')
+    .select('id, full_name')
+    .neq('id', id)
+    .ilike('full_name', `%${surname}%`)
+    .eq('active', true)
+    .limit(5)
+
+  const family_suggestions = (surnameMatches ?? [])
+    .filter((c: any) => !family?.members.some(m => m.client_id === c.id))
+    .map((c: any) => ({
+      client_id: c.id,
+      full_name: c.full_name,
+      reason: 'same_surname' as const,
+    }))
+
+  return {
+    ...client,
+    family,
+    family_role,
+    bookings: clientBookings,
+    total_spend_usd,
+    booking_count: clientBookings.length,
+    similar_clients,
+    family_suggestions,
+  }
+}
+
+// ----------------------------------------------------------------
+// Family queries
+// ----------------------------------------------------------------
+
+export async function createFamily(
+  familyName: string,
+  createdBy: string,
+): Promise<Family> {
+  const { data, error } = await supabase
+    .from('families')
+    .insert({ family_name: familyName, created_by: createdBy })
+    .select()
+    .single()
+
+  if (error) throw new Error(`createFamily: ${error.message}`)
+  return data as Family
+}
+
+export async function addFamilyMember(
+  familyId: string,
+  clientId: string,
+  role: FamilyMemberRole,
+  isPrimary: boolean,
+): Promise<void> {
+  const { error } = await supabase
+    .from('family_members')
+    .upsert({
+      family_id: familyId,
+      client_id: clientId,
+      role,
+      is_primary: isPrimary,
+    }, { onConflict: 'family_id,client_id' })
+
+  if (error) throw new Error(`addFamilyMember: ${error.message}`)
+}
+
+export async function removeFamilyMember(
+  familyId: string,
+  clientId: string,
+): Promise<void> {
+  const { error } = await supabase
+    .from('family_members')
+    .delete()
+    .eq('family_id', familyId)
+    .eq('client_id', clientId)
+
+  if (error) throw new Error(`removeFamilyMember: ${error.message}`)
+}
+
+export async function searchFamilies(query: string): Promise<Family[]> {
+  const { data, error } = await supabase
+    .from('families')
+    .select('*')
+    .ilike('family_name', `%${query}%`)
+    .order('family_name')
+    .limit(10)
+
+  if (error) return []
+  return (data ?? []) as Family[]
+}
+
+export async function mergeClients(
+  winnerId: string,
+  loserId: string,
+  reviewedBy: string,
+): Promise<void> {
+  // 1. Re-link bookings
+  await supabase.from('bookings').update({ client_id: winnerId }).eq('client_id', loserId)
+
+  // 2. Re-link family memberships
+  await supabase.from('family_members').update({ client_id: winnerId }).eq('client_id', loserId)
+
+  // 3. Re-link family booking members
+  await supabase.from('family_booking_members').update({ client_id: winnerId }).eq('client_id', loserId)
+
+  // 4. Mark loser as inactive
+  const { error } = await supabase
+    .from('clients')
+    .update({
+      active: false,
+      reviewed_by: reviewedBy,
+      reviewed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', loserId)
+
+  if (error) throw new Error(`mergeClients: ${error.message}`)
+}
+
+export async function updateClientRecord(
+  id: string,
+  fields: Partial<Pick<ClientRecord,
+    | 'full_name' | 'title' | 'first_name' | 'last_name'
+    | 'email' | 'phone' | 'whatsapp'
+    | 'nationality' | 'city_of_residence'
+    | 'vip_level' | 'company'
+    | 'general_notes' | 'internal_notes'
+  >>,
+): Promise<void> {
+  const { error } = await supabase
+    .from('clients')
+    .update({ ...fields, updated_at: new Date().toISOString() })
+    .eq('id', id)
+
+  if (error) throw new Error(`updateClientRecord: ${error.message}`)
 }

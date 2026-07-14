@@ -61,6 +61,7 @@ export interface Booking {
   trip_id: string | null
   suggested_trip_id: string | null
   trip_suggestion_dismissed: boolean
+  lead_client_id: string | null
   reviewed_by: string | null
   reviewed_at: string | null
   created_at: string
@@ -193,4 +194,64 @@ export interface TripGroup {
   is_multi_leg: boolean
   // Urgency — from most urgent leg
   most_urgent_deadline: string | null
+}
+
+// ----------------------------------------------------------------
+// Family types
+// ----------------------------------------------------------------
+
+export type FamilyMemberRole =
+  | 'primary'
+  | 'spouse'
+  | 'parent'
+  | 'child'
+  | 'sibling'
+  | 'business_partner'
+  | 'member'
+
+export interface Family {
+  id: string
+  family_name: string
+  notes: string | null
+  created_by: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface FamilyMember {
+  id: string
+  family_id: string
+  client_id: string
+  role: FamilyMemberRole
+  is_primary: boolean
+  created_at: string
+  // Joined
+  client?: ClientRecord
+}
+
+export interface FamilyWithMembers extends Family {
+  members: FamilyMember[]
+  total_spend_usd: number
+  booking_count: number
+}
+
+// Full client profile — ClientRecord + family + bookings + suggestions
+export interface ClientProfile extends ClientRecord {
+  family: FamilyWithMembers | null
+  family_role: FamilyMemberRole | null
+  bookings: Booking[]
+  total_spend_usd: number
+  booking_count: number
+  // Similar clients for merge suggestion
+  similar_clients: Array<{
+    id: string
+    full_name: string
+    similarity_score: number
+  }>
+  // Possible family suggestions based on surname or group bookings
+  family_suggestions: Array<{
+    client_id: string
+    full_name: string
+    reason: 'same_surname' | 'group_booking'
+  }>
 }
