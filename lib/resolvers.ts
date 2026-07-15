@@ -144,6 +144,31 @@ async function mergeClientFields(
   }
 }
 
+// Compound/placeholder patterns that should never become client records.
+// A valid client is always one individual person.
+const COMPOUND_NAME_PATTERNS = [
+  /\s+and\s+/i,           // "Mihir and Adrija"
+  /\s*&\s*/,              // "Mr & Mrs", "Harsh & Shivani"
+  /\s*\/\s*/,             // "Harsh / Shivani"
+  /\bfamily\b/i,          // "Agarwal Family"
+  /\bgroup\b/i,           // "Kedia Group"
+  /\bparty\b/i,           // "Ruia Party"
+  /^(nanny|child|baby|infant|guest|tba|tbc|unknown|occupant|companion|escort)/i,
+  /\boptions?\b/i,        // "Italy Options" (belt + suspenders)
+  /^(mr\.?\s+mrs|mrs\.?\s+mr|mr\.?\s+ms)/i, // "Mr & Mrs" title combos
+]
+
+// Maximum word count for a single person's name (generous — handles long Indian names)
+const MAX_NAME_WORDS = 6
+
+export function isValidClientName(name: string | null | undefined): boolean {
+  if (!name || name.trim().length < 2) return false
+  const n = name.trim()
+  if (COMPOUND_NAME_PATTERNS.some(p => p.test(n))) return false
+  if (n.split(/\s+/).length > MAX_NAME_WORDS) return false
+  return true
+}
+
 // ----------------------------------------------------------------
 // resolveClient
 // Returns the client_id for the incoming record, creating one if needed.

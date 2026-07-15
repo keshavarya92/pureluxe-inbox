@@ -81,6 +81,7 @@ export async function rejectBooking(id: string): Promise<void> {
 export async function updateBookingFields(
   id: string,
   fields: Partial<Pick<Booking,
+    | 'client_id'
     | 'client_name'
     | 'hotel_name'
     | 'city'

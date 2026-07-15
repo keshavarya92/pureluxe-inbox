@@ -8,7 +8,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from './supabase'
 import { getGmailClient } from './gmail'
 import { fetchAttachments, extractTextFromAttachment, type Attachment } from './attachments'
-import { resolveClient, resolveBooking, type ClientInput, type BookingInput } from './resolvers'
+import { resolveClient, resolveBooking, isValidClientName, type ClientInput, type BookingInput } from './resolvers'
 
 if (!process.env.ANTHROPIC_API_KEY) {
   throw new Error('Missing ANTHROPIC_API_KEY environment variable')
@@ -481,6 +481,10 @@ async function extractAndResolveGuests(
 
     // Skip hotel staff role names
     if (STAFF_ROLE_PATTERNS.some(p => p.test(name))) continue
+    if (!isValidClientName(name)) {
+      console.log(`[extract] skipping compound/invalid guest name: "${name}"`)
+      continue
+    }
 
     try {
       const clientId = await resolveClient({ full_name: name })
@@ -530,7 +534,7 @@ export async function writeExtracted(
       : bSrc?.client_name
         ? { full_name: bSrc.client_name }
         : null
-    if (clientSrc?.full_name) {
+    if (clientSrc?.full_name && isValidClientName(clientSrc.full_name)) {
       try {
         primaryClientId = await resolveClient(buildClientInput(clientSrc))
       } catch (err) {
@@ -651,7 +655,7 @@ export async function writeExtracted(
         if (action === 'update') {
           if (!Object.keys(matchOn).length) continue
           const [clientId, propertyId] = await Promise.all([
-            fields.client_name ? resolveClient({ full_name: fields.client_name }).catch(() => null) : Promise.resolve(null),
+            fields.client_name && isValidClientName(fields.client_name) ? resolveClient({ full_name: fields.client_name }).catch(() => null) : Promise.resolve(null),
             fields.hotel_name  ? resolveProperty(fields.hotel_name, fields.city ?? null, fields.country ?? null, fields.chain ?? null).catch(() => null) : Promise.resolve(null),
           ])
           const updatePayload: Record<string, unknown> = { ...fields }
@@ -691,7 +695,7 @@ export async function writeExtracted(
           if (!primaryPropId) primaryPropId = propId
 
           let bClientId = primaryClientId
-          if (!bClientId && fields.client_name) {
+          if (!bClientId && fields.client_name && isValidClientName(fields.client_name)) {
             bClientId = await resolveClient({ full_name: fields.client_name }).catch(() => null)
           }
           if (!bClientId || !fields.check_in || !fields.check_out) {
@@ -807,7 +811,7 @@ export async function writeExtracted(
 
         // create — resolved by pre-flight resolveClient for the primary client.
         // Secondary clients (rare in PureLuxe emails) are resolved here.
-        if (c !== firstClientRec && fields.full_name) {
+        if (c !== firstClientRec && fields.full_name && isValidClientName(fields.full_name)) {
           const secId = await resolveClient(buildClientInput(fields)).catch((err: any) => {
             console.error(`[extract] resolveClient (secondary) failed:`, err)
             return null
@@ -838,7 +842,7 @@ export async function writeExtracted(
         }
 
         const clientId = primaryClientId
-          ?? (fields.client_name ? await resolveClient({ full_name: fields.client_name }).catch(() => null) : null)
+          ?? (fields.client_name && isValidClientName(fields.client_name) ? await resolveClient({ full_name: fields.client_name }).catch(() => null) : null)
         if (!clientId) {
           console.log(`[write] client_preferences skip — no client_id resolved`, JSON.stringify(fields))
           continue
@@ -871,7 +875,7 @@ export async function writeExtracted(
         }
 
         const clientId = primaryClientId
-          ?? (fields.client_name ? await resolveClient({ full_name: fields.client_name }).catch(() => null) : null)
+          ?? (fields.client_name && isValidClientName(fields.client_name) ? await resolveClient({ full_name: fields.client_name }).catch(() => null) : null)
         if (!clientId) {
           console.log(`[write] client_health_notes skip — no client_id resolved`, JSON.stringify(fields))
           continue
@@ -1229,7 +1233,7 @@ export async function writeExtracted(
         }
 
         const clientId = primaryClientId
-          ?? (fields.client_name ? await resolveClient({ full_name: fields.client_name }).catch(() => null) : null)
+          ?? (fields.client_name && isValidClientName(fields.client_name) ? await resolveClient({ full_name: fields.client_name }).catch(() => null) : null)
         if (!clientId) {
           console.log(`[write] visa_tracking skip — no client_id resolved`, JSON.stringify(fields))
           continue

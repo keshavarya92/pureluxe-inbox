@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import type { QueueBooking } from '@/lib/studio/types'
 import { hasBookingRef } from '@/lib/studio/trip-grouping'
 import { DuplicateWarning } from './DuplicateWarning'
@@ -60,7 +60,33 @@ export function BookingQueueCard({
   })
   const [saving, setSaving] = useState(false)
 
-  const canApprove = booking.missing_required.length === 0
+  const [clientSearch, setClientSearch]       = useState('')
+  const [clientResults, setClientResults]     = useState<Array<{ id: string; full_name: string; email: string | null; phone: string | null }>>([])
+  const [selectedClient, setSelectedClient]   = useState<{ id: string; full_name: string } | null>(
+    booking.client_id && booking.client
+      ? { id: booking.client_id, full_name: booking.client.full_name ?? booking.client_name ?? '' }
+      : null
+  )
+  const [clientSearchOpen, setClientSearchOpen] = useState(false)
+  const [clientSearching, setClientSearching] = useState(false)
+
+  useEffect(() => {
+    if (clientSearch.length < 2) { setClientResults([]); return }
+    const timer = setTimeout(async () => {
+      setClientSearching(true)
+      try {
+        const res = await fetch(`/api/studio/clients?q=${encodeURIComponent(clientSearch)}`)
+        const { clients } = await res.json()
+        setClientResults(clients?.slice(0, 6) ?? [])
+      } finally {
+        setClientSearching(false)
+      }
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [clientSearch])
+
+  const hasClient = !!(selectedClient ?? booking.client_id)
+  const canApprove = booking.missing_required.filter(f => f.field !== 'client_id').length === 0 && hasClient
 
   const refDisplay =
     booking.amadeus_ref ?? booking.hotel_ref ?? booking.lhw_ref ??
@@ -77,6 +103,17 @@ export function BookingQueueCard({
   async function handleApprove() {
     setLoading('approve')
     try {
+      // If a different client was selected, update the booking first
+      if (selectedClient && selectedClient.id !== booking.client_id) {
+        await fetch(`/api/studio/queue/bookings/${booking.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            client_id: selectedClient.id,
+            client_name: selectedClient.full_name,
+          }),
+        })
+      }
       await onApprove(booking.id)
       onRefresh()
     } finally {
@@ -215,11 +252,61 @@ export function BookingQueueCard({
               value={formatDate(booking.cancellation_deadline)}
               missingLabel="Not found"
             />
-            <FieldStatus label="Client"
-              value={booking.client?.full_name ?? booking.client_name}
-              required={!booking.client_id}
-              missingLabel="Not linked"
-            />
+            <div>
+              <p className="text-[10px] text-[#9B9A97] uppercase tracking-[0.04em] mb-[3px]">Client</p>
+              {!clientSearchOpen ? (
+                <div className="flex items-center gap-2">
+                  <p className={`text-[12px] ${selectedClient ?? booking.client_id ? 'text-[#0F0F0D]' : 'text-[#E24B4A] italic'}`}>
+                    {selectedClient?.full_name ?? booking.client?.full_name ?? booking.client_name ?? 'Not linked'}
+                  </p>
+                  <button
+                    onClick={() => setClientSearchOpen(true)}
+                    className="text-[10px] text-[#185FA5] hover:underline shrink-0"
+                  >
+                    {selectedClient ?? booking.client_id ? 'Change' : 'Assign'}
+                  </button>
+                </div>
+              ) : (
+                <div className="relative">
+                  <input
+                    type="text"
+                    autoFocus
+                    placeholder="Search client…"
+                    value={clientSearch}
+                    onChange={e => setClientSearch(e.target.value)}
+                    className="w-full text-[11px] border border-[#185FA5] rounded px-2 py-1 focus:outline-none"
+                  />
+                  {clientSearching && (
+                    <p className="text-[10px] text-[#9B9A97] mt-1">Searching…</p>
+                  )}
+                  {clientResults.length > 0 && (
+                    <div className="absolute top-full left-0 right-0 bg-white border border-[#E5E4E0] rounded-md shadow-lg z-10 mt-0.5 max-h-40 overflow-y-auto">
+                      {clientResults.map(c => (
+                        <button
+                          key={c.id}
+                          onClick={() => {
+                            setSelectedClient({ id: c.id, full_name: c.full_name })
+                            setClientSearch('')
+                            setClientResults([])
+                            setClientSearchOpen(false)
+                          }}
+                          className="w-full text-left px-3 py-2 hover:bg-[#F5F4F1] border-b border-[#F5F4F1] last:border-0"
+                        >
+                          <p className="text-[12px] text-[#0F0F0D]">{c.full_name}</p>
+                          <p className="text-[10px] text-[#9B9A97]">{c.email ?? c.phone ?? ''}</p>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <button
+                    onClick={() => { setClientSearchOpen(false); setClientSearch(''); setClientResults([]) }}
+                    className="text-[10px] text-[#9B9A97] mt-1 hover:text-[#0F0F0D]"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+            </div>
           </>
         )}
       </div>
