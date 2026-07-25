@@ -14,8 +14,10 @@ const titleMap: Record<string, string> = {
   '/studio/queue': 'Queue',
   '/studio/queue/bookings': 'Queue',
   '/studio/queue/clients': 'Queue',
+  '/studio/bookings': 'Bookings',
   '/studio/trips': 'Trips',
   '/studio/clients': 'Clients',
+  '/studio/trainer': 'Trainer',
   '/studio/trip-builder': 'Trip Builder',
   '/studio/commissions': 'Commissions',
 }

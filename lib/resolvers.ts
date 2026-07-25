@@ -139,7 +139,8 @@ async function mergeClientFields(
 ): Promise<void> {
   const patch = buildClientMergePatch(existing, incoming)
   if (Object.keys(patch).length) {
-    await supabase.from('clients').update(patch).eq('id', existingId)
+    const { error } = await supabase.from('clients').update(patch).eq('id', existingId)
+    if (error) throw new Error(`mergeClientFields update id=${existingId}: ${error.message}`)
     console.log(`[resolver] clients merge id=${existingId} fields=${Object.keys(patch).join(',')}`)
   }
 }
@@ -150,6 +151,11 @@ const COMPOUND_NAME_PATTERNS = [
   /\s+and\s+/i,           // "Mihir and Adrija"
   /\s*&\s*/,              // "Mr & Mrs", "Harsh & Shivani"
   /\s*\/\s*/,             // "Harsh / Shivani"
+  // "Full Name A, Full Name B" — two people, comma-joined (>=2 words on
+  // each side of the comma). Deliberately requires 2+ words on the side
+  // before the comma so single-person "Surname, Given Name" entries (e.g.
+  // "Mehta, Neha" — confirmed live in the clients table) aren't rejected.
+  /^\S+(?:\s+\S+)+\s*,\s*\S+(?:\s+\S+)+$/,
   /\bfamily\b/i,          // "Agarwal Family"
   /\bgroup\b/i,           // "Kedia Group"
   /\bparty\b/i,           // "Ruia Party"
@@ -379,6 +385,29 @@ async function flagThreadClientConflict(
   if (error) console.error('[resolver] booking_conflict_flags insert error:', error.message)
 }
 
+// ----------------------------------------------------------------
+// findBookingByRef
+// Cross-thread ref lookup, run before inserting a thread-scoped booking.
+// bookings_thread_client_stay_dedup only catches duplicates within the same
+// Gmail thread — the same hotel confirmation forwarded or replied-to from a
+// different thread (another team member CC'd, a forward to "holidays", etc.)
+// has a different source_thread_id and would otherwise slip past it and
+// insert a duplicate row. Ref values (hotel_ref/amadeus_ref/...) are
+// effectively globally unique per stay, so match on those across all threads.
+// ----------------------------------------------------------------
+
+const REF_FIELDS = ['hotel_ref', 'amadeus_ref', 'lhw_ref', 'ottila_ref', 'onyx_ref'] as const
+
+async function findBookingByRef(incoming: BookingInput): Promise<Record<string, any> | null> {
+  for (const ref of REF_FIELDS) {
+    const val = incoming[ref]
+    if (!val) continue
+    const { data } = await supabase.from('bookings').select('*').eq(ref, val).limit(1)
+    if (data?.length) return data[0]
+  }
+  return null
+}
+
 // Fields that are high-risk to update without human review.
 // If an incoming update touches any of these on a confirmed booking,
 // route to pending_review instead of writing through.
@@ -433,6 +462,43 @@ export async function resolveBooking(
         console.log(`[resolver] bookings thread-match merge id=${threadMatch.id} fields=${Object.keys(patch).join(',')}`)
       }
       return { bookingId: threadMatch.id, action: 'updated' }
+    }
+
+    // No prior booking for this thread+client+stay — but the same hotel
+    // confirmation may already exist under a different thread. Check refs
+    // across all threads before inserting a duplicate row.
+    const refMatch = await findBookingByRef(incoming)
+    if (refMatch) {
+      if (refMatch.client_id && refMatch.client_id !== client_id) {
+        // Same ref, different client — likely a resolveClient split.
+        // Flag for review instead of silently merging into the wrong client.
+        console.warn(`[resolver] booking_ref_conflict ref-matched id=${refMatch.id} existing_client=${refMatch.client_id} incoming_client=${client_id} thread=${source_thread_id}`)
+        const { error: conflictErr } = await supabase.from('booking_conflict_flags').insert({
+          thread_id:       source_thread_id,
+          new_booking_id:  refMatch.id,
+          new_client_id:   client_id,
+          conflicting_ids: [refMatch.id],
+          check_in,
+          check_out,
+          reason:          'ref_match_different_client',
+        })
+        if (conflictErr) console.error('[resolver] booking_conflict_flags insert error:', conflictErr.message)
+      } else {
+        const patch = buildBookingPatch(refMatch, incoming)
+        if (Object.keys(patch).length) {
+          if (shouldQueueUpdate(refMatch, patch, isPendingReview)) {
+            patch.status = 'pending_review'
+          }
+          await supabase
+            .from('bookings')
+            .update({ ...patch, updated_at: new Date().toISOString() })
+            .eq('id', refMatch.id)
+          console.log(`[resolver] bookings ref-match merge id=${refMatch.id} fields=${Object.keys(patch).join(',')} (new thread=${source_thread_id})`)
+        } else {
+          console.log(`[resolver] bookings ref-match no new data id=${refMatch.id} (thread=${source_thread_id}) — skipped, no insert/requeue`)
+        }
+        return { bookingId: refMatch.id, action: 'updated' }
+      }
     }
 
     // No prior booking for this thread+client+stay — insert.

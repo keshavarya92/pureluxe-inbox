@@ -12,7 +12,9 @@
     "dedup:bookings": "DRY_RUN=true tsx scripts/dedup-bookings.ts",
     "dedup:clients": "tsx scripts/dedup-clients.ts",
     "migrate:refless-bookings": "tsx scripts/migrate-refless-bookings.ts",
-    "import:legacy": "DRY_RUN=true tsx scripts/import-legacy-bookings.ts"
+    "import:legacy": "DRY_RUN=true tsx scripts/import-legacy-bookings.ts",
+    "backfill:checked-out": "tsx scripts/backfill-checked-out.ts",
+    "audit:agarwal-boilerplate": "tsx scripts/audit-agarwal-boilerplate.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.100.1",
