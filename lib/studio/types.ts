@@ -59,6 +59,7 @@ export interface Booking {
   misc: string | null
   source_thread_id: string | null
   trip_id: string | null
+  amended_from: string | null
   suggested_trip_id: string | null
   trip_suggestion_dismissed: boolean
   lead_client_id: string | null

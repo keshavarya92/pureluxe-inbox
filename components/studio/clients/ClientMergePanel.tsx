@@ -38,7 +38,8 @@ export function ClientMergePanel({ client, userEmail, onMerged, onCancel }: Prop
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ winnerId, loserId }),
       })
-      if (!res.ok) throw new Error('Merge failed')
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Merge failed')
       onMerged()
     } catch (err: any) {
       alert(err.message)
@@ -94,7 +95,7 @@ export function ClientMergePanel({ client, userEmail, onMerged, onCancel }: Prop
       ) : (
         <>
           <p className="text-[11px] text-[#9B9A97] mb-3">
-            Choose which record to keep. The other will be deleted and its bookings transferred.
+            Choose which record to keep. The other will be deactivated and its bookings transferred.
           </p>
           <div className="grid grid-cols-2 gap-3 mb-4">
             {[

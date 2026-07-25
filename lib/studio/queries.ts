@@ -769,3 +769,192 @@ export async function updateClientRecord(
 
   if (error) throw new Error(`updateClientRecord: ${error.message}`)
 }
+
+// ----------------------------------------------------------------
+// Bookings tab queries
+// ----------------------------------------------------------------
+
+export type BookingSort =
+  | 'check_in_asc'
+  | 'check_in_desc'
+  | 'client_name_asc'
+  | 'client_name_desc'
+  | 'hotel_name_asc'
+  | 'hotel_name_desc'
+  | 'created_at_desc'
+  | 'total_cost_desc'
+  | 'total_cost_asc'
+
+export type BookingStatusFilter =
+  | 'all'
+  | 'confirmed'
+  | 'pending_review'
+  | 'checked_out'
+  | 'cancelled'
+  | 'superseded'
+
+export interface BookingsSearchParams {
+  query?: string
+  status?: BookingStatusFilter
+  sort?: BookingSort
+  booked_by?: string
+  check_in_from?: string
+  check_in_to?: string
+  page?: number
+  page_size?: number
+}
+
+export interface BookingsSearchResult {
+  bookings: Booking[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export async function searchBookings(params: BookingsSearchParams): Promise<BookingsSearchResult> {
+  const {
+    query = '',
+    status = 'all',
+    sort = 'check_in_desc',
+    check_in_from,
+    check_in_to,
+    page = 1,
+    page_size = 50,
+  } = params
+
+  let q = supabase
+    .from('bookings')
+    .select('*', { count: 'exact' })
+
+  // Status filter
+  if (status !== 'all') {
+    q = q.eq('status', status)
+  } else {
+    // Default: exclude rejected
+    q = q.neq('status', 'rejected')
+  }
+
+  // Text search
+  if (query.trim()) {
+    q = q.or(
+      `client_name.ilike.%${query}%,hotel_name.ilike.%${query}%,amadeus_ref.ilike.%${query}%,hotel_ref.ilike.%${query}%,city.ilike.%${query}%`
+    )
+  }
+
+  // Date range
+  if (check_in_from) q = q.gte('check_in', check_in_from)
+  if (check_in_to)   q = q.lte('check_in', check_in_to)
+
+  // Sort
+  const sortMap: Record<BookingSort, { col: string; asc: boolean }> = {
+    check_in_asc:     { col: 'check_in',     asc: true  },
+    check_in_desc:    { col: 'check_in',     asc: false },
+    client_name_asc:  { col: 'client_name',  asc: true  },
+    client_name_desc: { col: 'client_name',  asc: false },
+    hotel_name_asc:   { col: 'hotel_name',   asc: true  },
+    hotel_name_desc:  { col: 'hotel_name',   asc: false },
+    created_at_desc:  { col: 'created_at',   asc: false },
+    total_cost_desc:  { col: 'total_cost',   asc: false },
+    total_cost_asc:   { col: 'total_cost',   asc: true  },
+  }
+  const { col, asc } = sortMap[sort]
+  q = q.order(col, { ascending: asc, nullsFirst: false })
+
+  // Pagination
+  const from = (page - 1) * page_size
+  q = q.range(from, from + page_size - 1)
+
+  const { data, error, count } = await q
+  if (error) throw new Error(`searchBookings: ${error.message}`)
+
+  return {
+    bookings: (data ?? []) as Booking[],
+    total: count ?? 0,
+    page,
+    page_size,
+  }
+}
+
+// Flip confirmed bookings to checked_out once their check-out date has passed.
+// Called daily by the cron; safe to re-run (only touches status='confirmed' rows).
+export async function transitionExpiredBookings(): Promise<number> {
+  const today = new Date().toISOString().slice(0, 10)
+  const { data, error } = await supabase
+    .from('bookings')
+    .update({ status: 'checked_out', updated_at: new Date().toISOString() })
+    .eq('status', 'confirmed')
+    .lt('check_out', today)
+    .select('id')
+
+  if (error) throw new Error(`transitionExpiredBookings: ${error.message}`)
+  return data?.length ?? 0
+}
+
+export async function getBookingWithClient(id: string): Promise<(Booking & { client: ClientRecord | null }) | null> {
+  const { data, error } = await supabase
+    .from('bookings')
+    .select(`*, client:clients!client_id(*)`)
+    .eq('id', id)
+    .single()
+
+  if (error) return null
+  return data as Booking & { client: ClientRecord | null }
+}
+
+export async function updateBookingFull(
+  id: string,
+  fields: Partial<Pick<Booking,
+    | 'client_name' | 'client_id'
+    | 'hotel_name' | 'city' | 'country' | 'chain'
+    | 'check_in' | 'check_out'
+    | 'num_rooms' | 'num_adults' | 'num_children'
+    | 'total_cost' | 'currency' | 'total_cost_usd'
+    | 'amadeus_ref' | 'hotel_ref' | 'lhw_ref' | 'ottila_ref' | 'onyx_ref'
+    | 'booking_source' | 'booking_channel'
+    | 'status'
+    | 'cancellation_deadline' | 'cancellation_policy' | 'cancellation_date' | 'cancellation_reason'
+    | 'commission_rate' | 'commission_expected' | 'commission_channel' | 'commissionable'
+    | 'vip_flag' | 'vvip_flag' | 'special_occasion'
+    | 'is_group_booking' | 'group_name'
+    | 'notes' | 'internal_notes'
+  >>,
+): Promise<void> {
+  const { error } = await supabase
+    .from('bookings')
+    .update({ ...fields, updated_at: new Date().toISOString() })
+    .eq('id', id)
+
+  if (error) throw new Error(`updateBookingFull: ${error.message}`)
+}
+
+export async function mergeBookings(
+  winnerId: string,
+  loserId: string,
+  reviewedBy: string,
+): Promise<void> {
+  // Mark loser as rejected, link to winner via amended_from
+  const { error } = await supabase
+    .from('bookings')
+    .update({
+      status: 'rejected',
+      amended_from: winnerId,
+      reviewed_by: reviewedBy,
+      reviewed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', loserId)
+
+  if (error) throw new Error(`mergeBookings: ${error.message}`)
+}
+
+export async function getDistinctBookedBy(): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('bookings')
+    .select('booked_by_name')
+    .neq('booked_by_name', null)
+    .order('booked_by_name')
+
+  if (error) return []
+  const names = [...new Set((data ?? []).map((r: any) => r.booked_by_name).filter(Boolean))]
+  return names as string[]
+}

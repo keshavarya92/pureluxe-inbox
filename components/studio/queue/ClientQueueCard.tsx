@@ -67,7 +67,8 @@ function MergePanel({ incoming, similarClientId, onMerged, onCancel }: MergePane
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ winnerId, loserId }),
       })
-      if (!res.ok) throw new Error('Merge failed')
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Merge failed')
       onMerged()
     } catch (err: any) {
       alert(err.message)
@@ -101,7 +102,7 @@ function MergePanel({ incoming, similarClientId, onMerged, onCancel }: MergePane
   return (
     <div className="mt-3 pt-3 border-t border-[#FAC775]">
       <p className="text-[11px] font-medium text-[#633806] mb-2">
-        Choose which record to keep — the other will be deleted and its bookings transferred.
+        Choose which record to keep — the other will be deactivated and its bookings transferred.
       </p>
 
       <div className="grid grid-cols-2 gap-3 mb-3">

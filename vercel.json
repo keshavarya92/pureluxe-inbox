@@ -20,6 +20,9 @@
     "app/api/cron/batch-submit/route.ts": {
       "maxDuration": 300
     },
+    "app/api/cron/checkout-transition/route.ts": {
+      "maxDuration": 60
+    },
     "app/api/admin/extract/route.ts": {
       "maxDuration": 300
     },
@@ -41,6 +44,10 @@
 {
       "path": "/api/cron/batch-submit",
       "schedule": "0 * * * *"
+    },
+{
+      "path": "/api/cron/checkout-transition",
+      "schedule": "10 0 * * *"
     }
   ]
 }
