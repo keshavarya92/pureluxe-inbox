@@ -12,7 +12,12 @@
       "Bash(supabase --version)",
       "Bash(npx supabase *)",
       "Bash(npm run *)",
-      "Bash(npx vitest *)"
+      "Bash(npx vitest *)",
+      "Bash(npx tsx *)",
+      "Skill(run)",
+      "Skill(run:*)",
+      "Bash(tail -60 /tmp/dev3.log)",
+      "Read(//tmp/**)"
     ]
   }
 }
