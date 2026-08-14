@@ -34,6 +34,15 @@
     },
     "app/api/auth/callback/route.ts": {
       "maxDuration": 30
+    },
+    "app/api/studio/trip-builder/trips/[id]/documents/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/studio/trip-builder/chat/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/client/trips/[id]/chat/route.ts": {
+      "maxDuration": 60
     }
   },
   "crons": [

@@ -669,6 +669,80 @@ export async function resolveBooking(
 }
 
 // ----------------------------------------------------------------
+// resolveTrip
+// Attempts to auto-link a booking to an open Trip Builder trip by
+// matching client + property destination + overlapping stay dates.
+// Requires all three signals (client, property, dates) — auto-links
+// only on a single unambiguous trip match. No match, or more than
+// one candidate, leaves booking_trip_id null: the booking enters the
+// queue exactly as it does today, with linking left as a manual
+// "link to trip" action for later (not implemented by this resolver).
+// ----------------------------------------------------------------
+
+const OPEN_TRIP_STATUSES = ['building', 'quoted', 'confirmed'] as const
+
+export async function resolveTrip(
+  bookingId:  string,
+  clientId:   string | null | undefined,
+  propertyId: string | null | undefined,
+  checkIn:    string | null | undefined,
+  checkOut:   string | null | undefined,
+): Promise<string | null> {
+  if (!clientId || !propertyId || !checkIn || !checkOut) return null
+
+  const { data: property } = await supabase
+    .from('properties').select('city, country').eq('id', propertyId).maybeSingle()
+  const destTerms = [property?.city, property?.country].filter(Boolean) as string[]
+  if (!destTerms.length) return null
+
+  // Trips this client is on — either as the primary client or a linked traveler.
+  const [{ data: viaTripClients }, { data: viaPrimary }] = await Promise.all([
+    supabase.from('trip_clients').select('trip_id').eq('client_id', clientId),
+    supabase.from('trips').select('id').eq('primary_client_id', clientId),
+  ])
+  const candidateTripIds = new Set<string>([
+    ...(viaTripClients ?? []).map((r: any) => r.trip_id),
+    ...(viaPrimary ?? []).map((r: any) => r.id),
+  ])
+  if (!candidateTripIds.size) return null
+
+  const { data: openTrips } = await supabase
+    .from('trips').select('id')
+    .in('id', [...candidateTripIds])
+    .in('status', OPEN_TRIP_STATUSES)
+  if (!openTrips?.length) return null
+
+  const orDest = destTerms.map(t => `destination.ilike.%${t}%`).join(',')
+  const { data: legs } = await supabase
+    .from('trip_legs')
+    .select('trip_id, check_in, check_out')
+    .in('trip_id', openTrips.map((t: any) => t.id))
+    .or(orDest)
+
+  const matchedTripIds = new Set<string>()
+  for (const leg of legs ?? []) {
+    if (!leg.check_in || !leg.check_out) continue // can't confirm overlap without both leg dates
+    if (leg.check_in <= checkOut && leg.check_out >= checkIn) matchedTripIds.add(leg.trip_id)
+  }
+
+  if (matchedTripIds.size !== 1) {
+    if (matchedTripIds.size > 1) {
+      console.warn(`[resolver] resolveTrip ambiguous — booking=${bookingId} client=${clientId} candidates=${[...matchedTripIds].join(',')} — skipping auto-link`)
+    }
+    return null
+  }
+
+  const tripId = [...matchedTripIds][0]
+  const { error } = await supabase.from('bookings').update({ booking_trip_id: tripId }).eq('id', bookingId)
+  if (error) {
+    console.error(`[resolver] resolveTrip auto-link failed booking=${bookingId} trip=${tripId}: ${error.message}`)
+    return null
+  }
+  console.log(`[resolver] resolveTrip auto-linked booking=${bookingId} → trip=${tripId}`)
+  return tripId
+}
+
+// ----------------------------------------------------------------
 // Build a patch object: fill null fields + append notes.
 // Never overwrites an existing non-null value (except notes append).
 // ----------------------------------------------------------------

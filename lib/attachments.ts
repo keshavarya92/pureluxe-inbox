@@ -97,7 +97,7 @@ function stripHtmlTags(html: string): string {
 }
 
 /** Sniff actual image format from magic bytes — Gmail headers can lie. */
-function sniffImageMime(data: Buffer): 'image/jpeg' | 'image/png' | null {
+export function sniffImageMime(data: Buffer): 'image/jpeg' | 'image/png' | null {
   if (data.length >= 2 && data[0] === 0xff && data[1] === 0xd8) return 'image/jpeg'
   if (data.length >= 4 && data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47) return 'image/png'
   return null

@@ -90,7 +90,7 @@ const opsNav: NavItem[] = [
   { label: 'Home', href: '/studio/home', icon: <HouseIcon /> },
   { label: 'Queue', href: '/studio/queue', icon: <InboxIcon /> },
   { label: 'Bookings', href: '/studio/bookings', icon: <BookingsIcon /> },
-  { label: 'Trip Builder', href: '/studio/trip-builder', icon: <RouteIcon />, comingSoon: true },
+  { label: 'Trip Builder', href: '/studio/trip-builder', icon: <RouteIcon /> },
   { label: 'Trips', href: '/studio/trips', icon: <MapIcon /> },
   { label: 'Clients', href: '/studio/clients', icon: <UsersIcon /> },
   { label: 'Trainer', href: '/studio/trainer', icon: <ChatIcon /> },

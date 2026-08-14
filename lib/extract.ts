@@ -8,7 +8,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from './supabase'
 import { getGmailClient } from './gmail'
 import { fetchAttachments, extractTextFromAttachment, type Attachment } from './attachments'
-import { resolveClient, resolveBooking, isValidClientName, type ClientInput, type BookingInput } from './resolvers'
+import { resolveClient, resolveBooking, resolveTrip, isValidClientName, type ClientInput, type BookingInput } from './resolvers'
 
 if (!process.env.ANTHROPIC_API_KEY) {
   throw new Error('Missing ANTHROPIC_API_KEY environment variable')
@@ -580,6 +580,9 @@ export async function writeExtracted(
           const resolved = await resolveBooking(primaryBookingInput, isPendingReview)
           bookingId = resolved.bookingId
           console.log(`[extract] resolved client_id=${primaryClientId} booking_id=${bookingId} action=${resolved.action}`)
+          await resolveTrip(bookingId, primaryClientId, propId, bFields.check_in, bFields.check_out).catch(err => {
+            console.warn(`[extract] resolveTrip failed for booking ${bookingId}:`, err)
+          })
           if (resolved.action === 'inserted' && !parsed.commissions?.length
               && (bFields.commission_rate || bFields.commission_expected)) {
             try {
@@ -681,6 +684,9 @@ export async function writeExtracted(
           const orphanResolved = await resolveBooking(orphanInput, isPendingReview)
           if (!bookingId) bookingId = orphanResolved.bookingId
           console.log(`[write] bookings orphaned update → inserted id=${orphanResolved.bookingId}`)
+          await resolveTrip(orphanResolved.bookingId, orphanClientId, propertyId, fields.check_in, fields.check_out).catch(err => {
+            console.warn(`[extract] resolveTrip failed for booking ${orphanResolved.bookingId}:`, err)
+          })
           continue
         }
 
@@ -731,6 +737,9 @@ export async function writeExtracted(
           const addlResolved = await resolveBooking(addlBookingInput, isPendingReview)
           if (!bookingId) bookingId = addlResolved.bookingId
           console.log(`[write] bookings additional booking_id=${addlResolved.bookingId} action=${addlResolved.action}`)
+          await resolveTrip(addlResolved.bookingId, bClientId, propId, fields.check_in, fields.check_out).catch(err => {
+            console.warn(`[extract] resolveTrip failed for booking ${addlResolved.bookingId}:`, err)
+          })
 
           if (addlResolved.action === 'inserted' && !parsed.commissions?.length
               && (fields.commission_rate || fields.commission_expected)) {
